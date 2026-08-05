@@ -6,7 +6,11 @@
 - /机器状态 file [格式] [粒度]：立即生成状态文件（格式 json/md/txt/csv，粒度 summary/full）
 - /机器状态 report：立即向播报目标发送一次状态报告
 - /机器状态 reload：重新加载机器配置
+- /机器状态 权限...：权限规则远程管理（允许/拒绝/询问/删除/清空/事件）
+- /机器状态 同意 <ID> / 拒绝 <ID>：serve 模式下远程批准/拒绝挂起的权限请求
+- /机器状态 加密串 <明文>：把密码加密成 dpapi: 密文（凭据安全）
 - 定时自动播报（默认每 30 分钟），状态变化实时播报（默认每 60 秒检测）
+- 权限事件监控：opencode 日志中的权限请求/评估自动转发到群
 - 状态文件支持多格式、多种送达方式（文本/文件/本地），生成时机可配置（手动/定时/变化时）
 
 机器配置见 data/machines.json，格式说明见 monitor.py 顶部注释。
@@ -29,6 +33,7 @@ from .formatter import (
     write_files,
 )
 from .monitor import Monitor
+from .perm import PermissionMonitor, PermRequest, RuleManager, ServeClient
 
 FILE_FORMATS = ("json", "md", "txt", "csv")
 FILE_DETAILS = ("summary", "full")
@@ -49,7 +54,24 @@ class StatusSyncPlugin(Star):
         self.monitor = Monitor(config, self.plugin_dir)
         self._task: asyncio.Task | None = None
         self._change_task: asyncio.Task | None = None
+        self._perm_task: asyncio.Task | None = None
+        self._serve_task: asyncio.Task | None = None
         self._recent_sessions: list[str] = []
+        self._loop = asyncio.get_event_loop()
+        # 权限远程控制
+        self.perm_monitor = PermissionMonitor(config, self.plugin_dir)
+        cfg_file = config.get("opencode_config_file", "%USERPROFILE%/.config/opencode/opencode.jsonc")
+        self.perm_rules = RuleManager(os.path.expandvars(os.path.expanduser(cfg_file)))
+        serve_url = config.get("opencode_serve_url", "") or ""
+        self.serve = (
+            ServeClient(
+                serve_url,
+                config.get("opencode_serve_username", "") or "",
+                config.get("opencode_serve_password", "") or "",
+            )
+            if serve_url
+            else None
+        )
 
     # ---------- 命令 ----------
 
@@ -92,12 +114,113 @@ class StatusSyncPlugin(Star):
             states = await self.monitor.check_all()
             await self._broadcast(format_overview(states))
             return "已播报状态报告"
+        if cmd == "权限":
+            return await self._handle_permission(tokens)
+        if cmd.startswith("权限") and len(cmd) > 2:
+            # 兼容连写形式：/机器状态 权限允许 bash git push *
+            return await self._handle_permission(["权限", cmd[2:]] + tokens[1:])
+        if cmd in ("同意", "批准", "allow"):
+            return await self._handle_approve(tokens, approve=True)
+        if cmd in ("拒绝", "驳回", "deny"):
+            return await self._handle_approve(tokens, approve=False)
+        if cmd in ("加密串", "encrypt"):
+            return await self._handle_encrypt(tokens)
         states = await self.monitor.check_all()
         st = next((s for s in states if s.get("name") == sub), None)
         if st is None:
             names = "、".join(s.get("name", "?") for s in states)
             return f"未找到机器 {sub}，可用机器: {names}"
         return format_detail(st)
+
+    # ---------- 权限远程控制 ----------
+
+    async def _handle_permission(self, tokens: list[str]) -> str:
+        """权限规则管理：权限 / 权限允许 <工具> <模式> / 权限拒绝 / 权限询问 / 权限删除 / 权限清空 / 权限事件"""
+        sub = tokens[1] if len(tokens) > 1 else ""
+        if not sub:
+            return self.perm_rules.format_rules()
+        if sub == "清空":
+            return self.perm_rules.clear_rules()
+        if sub == "事件":
+            evs = self.perm_monitor.recent(10)
+            if not evs:
+                return "暂无权限事件记录"
+            return "\n".join(
+                f"[{e.action}] {e.source} {e.tool}「{e.pattern}」 @{e.ts}"
+                for e in evs
+            )
+        if sub in ("允许", "allow", "拒绝", "deny", "询问", "ask"):
+            if len(tokens) < 3:
+                return f"用法: /机器状态 权限{sub} <工具> <模式>（如: 权限{sub} bash git push *）"
+            action = {"允许": "allow", "allow": "allow", "拒绝": "deny", "deny": "deny", "询问": "ask", "ask": "ask"}[sub]
+            tool = tokens[2]
+            pattern = " ".join(tokens[3:]) or "*"
+            return self.perm_rules.set_rule(tool, pattern, action)
+        if sub in ("删除", "remove"):
+            if len(tokens) < 3:
+                return "用法: /机器状态 权限删除 <工具> <模式>"
+            tool = tokens[2]
+            pattern = " ".join(tokens[3:]) or "*"
+            return self.perm_rules.remove_rule(tool, pattern)
+        return f"未知子命令: {sub}（支持: 允许/拒绝/询问/删除/清空/事件）"
+
+    async def _handle_approve(self, tokens: list[str], approve: bool) -> str:
+        """同意/拒绝 serve 模式下挂起的权限请求"""
+        if not self.serve:
+            return "未启用 opencode serve 远程批准（请配置 opencode_serve_url）"
+        if len(tokens) < 2:
+            return "用法: /机器状态 同意 <权限ID> [always]"
+        pid = tokens[1]
+        remember = len(tokens) > 2 and tokens[2] == "always"
+        response = "once" if approve else "reject"
+        if remember:
+            response = "always"
+        self.serve.prune()
+        req = self.serve.pending.get(pid)
+        if not req:
+            pending_ids = list(self.serve.pending.keys())[:10]
+            return (
+                f"未找到权限请求 {pid}（可能已过期）"
+                + (f"\n当前挂起: {pending_ids}" if pending_ids else "")
+            )
+        ok = await asyncio.to_thread(
+            self.serve.respond, pid, response, remember
+        )
+        if ok:
+            return f"已{'批准' if approve else '拒绝'}权限请求 {pid}（{req.tool}「{req.detail}」）"
+        return f"响应失败：请求可能已被处理或会话已结束"
+
+    async def _handle_encrypt(self, tokens: list[str]) -> str:
+        """把密码明文就地加密成 dpapi 密文（仅当前 Windows 用户可解）"""
+        if len(tokens) < 2:
+            return "用法: /机器状态 加密串 <明文密码>（Windows 上生成 dpapi: 密文）"
+        try:
+            from .secret import dpapi_encrypt
+        except Exception as e:  # noqa: BLE001
+            return f"加密不可用: {e}"
+        try:
+            b64 = dpapi_encrypt(" ".join(tokens[1:]))
+        except Exception as e:  # noqa: BLE001
+            return f"加密失败（仅支持 Windows）: {e}"
+        return (
+            "已生成 DPAPI 密文（仅本机当前用户可解密），"
+            "填入 machines.json 对应字段:\n"
+            f"dpapi:{b64}\n"
+            "注意：此密文在别的用户/机器上无法解密，请勿下发到群以外环境。"
+        )
+
+    async def _on_perm_request(self, req: PermRequest):
+        """收到 serve 权限请求，转发到群"""
+        if not self.cfg.get("permission_report", True):
+            return
+        text = (
+            "[权限请求] opencode 请求执行\n"
+            f"工具: {req.tool}\n"
+            f"内容: {req.detail}\n"
+            f"权限ID: {req.permission_id}\n"
+            "回复「同意 <ID>」放行，或「拒绝 <ID>」阻止"
+        )
+        await self._broadcast(text)
 
     # ---------- 播报 ----------
 
@@ -202,15 +325,59 @@ class StatusSyncPlugin(Star):
         if self._change_task is None:
             self._change_task = asyncio.create_task(self._change_loop())
             logger.info("状态同步：状态变化检测任务已启动")
+        if self._perm_task is None:
+            self.perm_monitor.load_cursor()
+            self._perm_task = asyncio.create_task(self._perm_loop())
+            logger.info("状态同步：权限事件监控任务已启动")
+        if self.serve is not None and self._serve_task is None:
+            if await asyncio.to_thread(self.serve.probe):
+                self._serve_task = asyncio.create_task(
+                    self.serve.listen_loop(self._on_perm_request, self._loop)
+                )
+                logger.info(f"状态同步：已连接 opencode serve ({self.serve.base_url})")
+            else:
+                logger.warning("状态同步：opencode serve 不可达，远程批准未启用")
 
     @filter.on_plugin_unloaded()
     async def on_plugin_unloaded(self):
-        for task in (self._task, self._change_task):
+        for task in (self._task, self._change_task, self._perm_task, self._serve_task):
             if task:
                 task.cancel()
         self._task = None
         self._change_task = None
+        self._perm_task = None
+        self._serve_task = None
         await self.monitor.close_all()
+
+    async def _perm_loop(self):
+        """定期检查 opencode 日志中的权限评估事件并转发"""
+        interval = max(5, int(self.cfg.get("permission_check_interval_seconds", 30)))
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                if not self.cfg.get("permission_report", True):
+                    continue
+                if not self._report_targets():
+                    continue
+                events = self.perm_monitor.poll(self.monitor.machines)
+                if not events:
+                    continue
+                level_cfg = self.cfg.get("permission_forward_level", "deny,ask")
+                allowed = {
+                    x.strip() for x in str(level_cfg).split(",") if x.strip()
+                }
+                for ev in events:
+                    if ev.action not in allowed:
+                        continue
+                    text = (
+                        f"[权限] {ev.source}: {ev.tool} 请求执行「{ev.pattern}」"
+                        f" → {ev.action}"
+                    )
+                    await self._broadcast(text)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.exception("权限事件监控失败")
 
     async def _poll_loop(self):
         while True:

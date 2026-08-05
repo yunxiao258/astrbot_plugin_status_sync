@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(_PLUGIN_DIR))
 
 from astrbot_plugin_status_sync.main import StatusSyncPlugin
 from astrbot_plugin_status_sync.monitor import Monitor
+from astrbot_plugin_status_sync.perm import PermissionMonitor, RuleManager
 
 PASS = 0
 FAIL = 0
@@ -233,6 +234,81 @@ def test_file_delivery():
     check("full 文本含 CLI", "CLI" in full_text)
 
 
+def make_perm_plugin(tmp_dir):
+    """构造带权限管理能力的插件（注入 perm_rules/perm_monitor/serve）"""
+    import asyncio
+
+    plugin = make_plugin({
+        "opencode_config_file": os.path.join(tmp_dir, "opencode.jsonc"),
+        "permission_report": True,
+        "permission_forward_level": "deny,ask",
+        "permission_check_interval_seconds": 30,
+        "permission_event_buffer": 30,
+    })
+    plugin.perm_rules = RuleManager(os.path.join(tmp_dir, "opencode.jsonc"))
+    plugin.perm_monitor = PermissionMonitor(plugin.cfg, _PLUGIN_DIR)
+    plugin.serve = None
+    plugin._loop = asyncio.new_event_loop()
+    return plugin
+
+
+def test_permission_commands():
+    print("[权限命令]")
+    import asyncio
+
+    async def run_cmd(plugin, msg):
+        ev = FakeEvent(msg)
+        await plugin.status_cmd(ev)
+        return ev.sent_text or ""
+
+    with tempfile.TemporaryDirectory() as d:
+        plugin = make_perm_plugin(d)
+        t = asyncio.run(run_cmd(plugin, "机器状态 权限"))
+        check("权限无规则提示", "无自定义规则" in t)
+        t = asyncio.run(run_cmd(plugin, "机器状态 权限允许 bash git push *"))
+        check("远程设置允许", "已设置规则" in t and "allow" in t)
+        t = asyncio.run(run_cmd(plugin, "机器状态 权限"))
+        check("规则写入生效", "git push *" in t)
+        t = asyncio.run(run_cmd(plugin, "机器状态 权限拒绝 bash rm *"))
+        check("远程设置拒绝", "已设置规则" in t and "deny" in t)
+        t = asyncio.run(run_cmd(plugin, "机器状态 权限删除 bash git push *"))
+        check("删除规则", "已删除规则" in t)
+        t = asyncio.run(run_cmd(plugin, "机器状态 权限询问 edit *"))
+        check("设为询问", "已设置规则" in t and "ask" in t)
+        t = asyncio.run(run_cmd(plugin, "机器状态 权限事件"))
+        check("权限事件空", "暂无权限事件记录" in t)
+        t = asyncio.run(run_cmd(plugin, "机器状态 同意 abc"))
+        check("未启用 serve 提示", "未启用 opencode serve" in t)
+        t = asyncio.run(run_cmd(plugin, "机器状态 权限清空"))
+        check("清空权限", "已清空" in t)
+
+        # 配置文件实际落盘
+        with open(os.path.join(d, "opencode.jsonc"), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        check("配置写入磁盘", data.get("permission") == {} or "permission" not in data)
+
+
+def test_encrypt_command():
+    print("[加密串命令]")
+    import asyncio
+
+    from astrbot_plugin_status_sync.secret import is_windows
+
+    async def run_cmd(plugin, msg):
+        ev = FakeEvent(msg)
+        await plugin.status_cmd(ev)
+        return ev.sent_text or ""
+
+    plugin = make_plugin({})
+    t = asyncio.run(run_cmd(plugin, "机器状态 加密串 我的密码"))
+    check("加密命令有输出", "dpapi:" in t or "仅支持 Windows" in t)
+    if "dpapi:" in t:
+        from astrbot_plugin_status_sync.secret import dpapi_decrypt
+
+        b64 = t.split("dpapi:")[1].split("\n")[0].strip()
+        check("加密串可解密还原", dpapi_decrypt(b64) == "我的密码")
+
+
 def test_report_targets():
     print("[播报目标]")
     import asyncio
@@ -266,6 +342,8 @@ if __name__ == "__main__":
     test_error_branches()
     test_command_dispatch()
     test_file_delivery()
+    test_permission_commands()
+    test_encrypt_command()
     test_report_targets()
     test_disabled()
     print(f"\n===== 结果: {PASS} PASS / {FAIL} FAIL =====")

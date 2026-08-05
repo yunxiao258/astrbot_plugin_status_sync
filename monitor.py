@@ -40,6 +40,7 @@ from .connectors import (
     linux_tail_script,
     win_tail_script,
 )
+from .secret import lock_machines_file
 
 # 机器配置缺失时使用的内置默认配置
 DEFAULT_MACHINES = {
@@ -166,6 +167,10 @@ class Monitor:
                 data = json.load(fh)
             machines = data.get("machines", [])
             logger.info(f"状态同步：已加载机器配置 {path}，共 {len(machines)} 台")
+            try:
+                lock_machines_file(path)
+            except Exception:  # noqa: BLE001
+                pass
         except FileNotFoundError:
             machines = DEFAULT_MACHINES["machines"]
             logger.warning(f"状态同步：机器配置 {path} 不存在，使用内置默认配置")

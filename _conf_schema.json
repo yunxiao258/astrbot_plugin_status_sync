@@ -59,6 +59,46 @@
     "type": "string",
     "default": "manual,scheduled,on_change"
   },
+  "permission_report": {
+    "description": "是否把权限事件转发到群（opencode 日志监控 + serve 请求转发）",
+    "type": "bool",
+    "default": true
+  },
+  "permission_forward_level": {
+    "description": "日志权限事件转发级别（deny=被阻止/ask=请求批准/allow=自动放行），多个用英文逗号分隔；all=全部转发",
+    "type": "string",
+    "default": "deny,ask"
+  },
+  "permission_check_interval_seconds": {
+    "description": "权限日志检测间隔（秒），最小 5",
+    "type": "int",
+    "default": 30
+  },
+  "permission_event_buffer": {
+    "description": "内存中保留的权限事件条数（供 /机器状态 权限事件 查看）",
+    "type": "int",
+    "default": 30
+  },
+  "opencode_config_file": {
+    "description": "opencode 全局配置文件路径（权限规则写入此文件）",
+    "type": "string",
+    "default": "%USERPROFILE%/.config/opencode/opencode.jsonc"
+  },
+  "opencode_serve_url": {
+    "description": "opencode serve 服务地址（如 http://127.0.0.1:4096），留空不启用远程批准",
+    "type": "string",
+    "default": ""
+  },
+  "opencode_serve_username": {
+    "description": "opencode serve HTTP Basic Auth 用户名（可选，默认 opencode）",
+    "type": "string",
+    "default": ""
+  },
+  "opencode_serve_password": {
+    "description": "opencode serve HTTP Basic Auth 密码（可选）",
+    "type": "string",
+    "default": ""
+  },
   "machines_config_file": {
     "description": "机器配置 JSON 文件路径（相对插件目录），文件不存在时使用内置默认配置",
     "type": "string",

@@ -6,10 +6,13 @@
 """
 
 import asyncio
+import io
 import os
 import subprocess
 
 from astrbot.api import logger
+
+from .secret import clean_host, resolve_secret
 
 # ---------- 远程检测脚本模板 ----------
 
@@ -105,13 +108,35 @@ class SshConnector(BaseConnector):
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.host = cfg.get("host", "")
+        self.host = clean_host(cfg.get("host", ""))
         self.port = int(cfg.get("port") or 22)
         self.username = cfg.get("username", "")
-        self.password = cfg.get("password")
-        self.private_key = cfg.get("private_key")
+        self.password = resolve_secret(cfg.get("password", ""))
+        self.private_key_raw = cfg.get("private_key")
         self._client = None
         self._lock = asyncio.Lock()
+
+    def _make_key(self):
+        """构造 paramiko PKey：支持文件路径 / env:内容 / file内容"""
+        raw = self.private_key_raw
+        if not raw:
+            return None
+        path = os.path.expanduser(os.path.expandvars(raw))
+        if os.path.isfile(path):
+            return None, path  # 交给 key_filename
+        content = resolve_secret(raw)
+        if content.startswith("-----BEGIN"):
+            import paramiko
+
+            pkey = None
+            for cls in (paramiko.RSAKey, paramiko.ECDSAKey, paramiko.Ed25519Key):
+                try:
+                    pkey = cls.from_private_key(io.StringIO(content))
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+            return pkey, None
+        return None, None
 
     async def _ensure(self):
         if self._client is not None:
@@ -120,7 +145,7 @@ class SshConnector(BaseConnector):
                     return
             except Exception:
                 self._client = None
-        if not self.password and not self.private_key:
+        if not self.password and not self.private_key_raw:
             raise RuntimeError(f"SSH {self.host} 未配置密码或私钥")
         import paramiko
 
@@ -129,8 +154,13 @@ class SshConnector(BaseConnector):
         kwargs = {"username": self.username, "timeout": 15}
         if self.password:
             kwargs["password"] = self.password
-        if self.private_key:
-            kwargs["key_filename"] = os.path.expanduser(self.private_key)
+        pkey, key_path = None, None
+        if self.private_key_raw:
+            pkey, key_path = self._make_key()
+            if pkey:
+                kwargs["pkey"] = pkey
+            elif key_path:
+                kwargs["key_filename"] = key_path
         await asyncio.to_thread(client.connect, self.host, port=self.port, **kwargs)
         self._client = client
 
@@ -160,10 +190,10 @@ class WinrmConnector(BaseConnector):
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.host = cfg.get("host", "")
+        self.host = clean_host(cfg.get("host", ""))
         self.port = int(cfg.get("port") or 5985)
         self.username = cfg.get("username", "")
-        self.password = cfg.get("password", "")
+        self.password = resolve_secret(cfg.get("password", ""))
         self.transport = cfg.get("transport", "ntlm")
         self.https = bool(cfg.get("https", False))
         self._session = None
@@ -200,7 +230,7 @@ class HttpConnector(BaseConnector):
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.base_url = (cfg.get("base_url") or "").rstrip("/")
-        self.token = cfg.get("token")
+        self.token = resolve_secret(cfg.get("token", ""))
 
     async def fetch_status(self, timeout: int = 15) -> dict:
         import requests
