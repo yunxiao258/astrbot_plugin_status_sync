@@ -1,0 +1,67 @@
+{
+  "enabled": {
+    "description": "是否启用插件",
+    "type": "bool",
+    "default": true
+  },
+  "poll_interval_minutes": {
+    "description": "定时自动播报间隔（分钟），最小 1",
+    "type": "int",
+    "default": 30
+  },
+  "report_enabled": {
+    "description": "是否启用定时自动播报",
+    "type": "bool",
+    "default": true
+  },
+  "state_change_report": {
+    "description": "是否启用状态变化即时播报（程序启动/停止时立即通知群）",
+    "type": "bool",
+    "default": true
+  },
+  "state_change_interval_seconds": {
+    "description": "状态变化检测间隔（秒），最小 10",
+    "type": "int",
+    "default": 60
+  },
+  "report_groups": {
+    "description": "定时播报目标会话 UMO（如 default:GroupMessage:1102410958），多个用英文逗号分隔；留空则播报到最近使用过 /status 的会话",
+    "type": "string",
+    "default": ""
+  },
+  "status_file_enabled": {
+    "description": "是否启用状态文件输出",
+    "type": "bool",
+    "default": true
+  },
+  "status_file": {
+    "description": "状态文件输出路径（相对插件目录），文件名作为各格式文件的基础名",
+    "type": "string",
+    "default": "data/status_sync.json"
+  },
+  "file_formats": {
+    "description": "状态文件格式，多个用英文逗号分隔（json/md/txt/csv），留空不生成文件",
+    "type": "string",
+    "default": "json,md,txt,csv"
+  },
+  "file_delivery": {
+    "description": "状态送达方式，多个用英文逗号分隔（text=文本消息/file=文件消息/local=仅本地保存）",
+    "type": "string",
+    "default": "text,file,local"
+  },
+  "file_detail": {
+    "description": "状态文件内容粒度（summary=概览摘要/full=全量详情）",
+    "type": "string",
+    "default": "summary"
+  },
+  "file_generate_timing": {
+    "description": "状态文件生成时机，多个用英文逗号分隔（manual=手动命令/scheduled=定时播报时/on_change=状态变化时）",
+    "type": "string",
+    "default": "manual,scheduled,on_change"
+  },
+  "machines_config_file": {
+    "description": "机器配置 JSON 文件路径（相对插件目录），文件不存在时使用内置默认配置",
+    "type": "string",
+    "default": "data/machines.json"
+  }
+}
