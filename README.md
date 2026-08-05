@@ -2,6 +2,8 @@
 
 AstrBot 插件：同步电脑端 opencode / mimocode / openclaw 等程序运行状态，支持本机与远程多机器检测。
 
+> 凭据配置（Windows / Linux / Docker 三套方案）见 [SECURITY.md](SECURITY.md)。
+
 ## 功能
 
 - 进程检测：各程序是否运行（按进程名/命令行匹配，支持正则）
