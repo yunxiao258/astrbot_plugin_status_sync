@@ -1,4 +1,4 @@
-"""AstrBot 插件：同步电脑端 opencode / mimocode / openclaw 等程序运行状态。
+﻿"""AstrBot 插件：同步电脑端 opencode / mimocode / openclaw 等程序运行状态。
 
 功能：
 - /机器状态（或 /sync）：查看所有机器状态概览
@@ -56,6 +56,7 @@ class StatusSyncPlugin(Star):
         self._change_task: asyncio.Task | None = None
         self._perm_task: asyncio.Task | None = None
         self._serve_task: asyncio.Task | None = None
+        self._serve_retry_task: asyncio.Task | None = None
         self._recent_sessions: list[str] = []
         self._loop = asyncio.get_event_loop()
         # 权限远程控制
@@ -241,10 +242,70 @@ class StatusSyncPlugin(Star):
             groups = [g for g in (groups or []) if g]
         return groups or list(self._recent_sessions)
 
+    def _first_self_id(self, platform_name: str) -> str:
+        """取平台首个已连接 OneBot 客户端的 self_id（多连接时缺 self_id 会 ApiNotAvailable）"""
+        try:
+            plat = next(
+                (
+                    p
+                    for p in self.context.platform_manager.platform_insts
+                    if p.meta().id == platform_name
+                ),
+                None,
+            )
+            bot = getattr(plat, "bot", None)
+            clients = getattr(bot, "_wsr_api_clients", None) or getattr(bot, "_api_clients", None)
+            if isinstance(clients, dict) and clients:
+                return str(next(iter(clients)))
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
+    async def _send_chain(self, umo: str, chain) -> bool:
+        """带 self_id 直发（多连接时 context.send_message 会 ApiNotAvailable），失败回退"""
+        try:
+            from astrbot.core.platform.message_session import MessageSesion
+            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                AiocqhttpMessageEvent,
+            )
+            from astrbot.api.all import MessageType
+
+            session = MessageSesion.from_str(umo)
+            plat = next(
+                (
+                    p
+                    for p in self.context.platform_manager.platform_insts
+                    if p.meta().id == session.platform_name
+                ),
+                None,
+            )
+            if plat is not None and getattr(plat, "bot", None) is not None:
+                sid = self._first_self_id(session.platform_name)
+                if sid:
+                    seg = await AiocqhttpMessageEvent._parse_onebot_json(chain)
+                    if not seg:
+                        return True
+                    if session.message_type == MessageType.GROUP_MESSAGE:
+                        await plat.bot.send_group_msg(
+                            group_id=int(session.session_id),
+                            message=seg,
+                            self_id=sid,
+                        )
+                    elif session.message_type == MessageType.FRIEND_MESSAGE:
+                        await plat.bot.send_private_msg(
+                            user_id=int(session.session_id),
+                            message=seg,
+                            self_id=sid,
+                        )
+                    return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"self_id 直发失败（回退 send_message）: {e!r}")
+        return await self.context.send_message(umo, chain)
+
     async def _broadcast(self, text: str):
         for umo in self._report_targets():
             try:
-                await self.context.send_message(umo, MessageChain([Plain(text)]))
+                await self._send_chain(umo, MessageChain([Plain(text)]))
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"播报到 {umo} 失败: {e}")
 
@@ -269,7 +330,7 @@ class StatusSyncPlugin(Star):
         name = f"状态同步_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{fmt}"
         for umo in self._report_targets():
             try:
-                await self.context.send_message(
+                await self._send_chain(
                     umo, MessageChain([File(name=name, file=path)])
                 )
             except Exception as e:  # noqa: BLE001
@@ -336,17 +397,36 @@ class StatusSyncPlugin(Star):
                 )
                 logger.info(f"状态同步：已连接 opencode serve ({self.serve.base_url})")
             else:
-                logger.warning("状态同步：opencode serve 不可达，远程批准未启用")
+                self._serve_retry_task = asyncio.create_task(self._serve_connect_loop())
+                logger.warning("状态同步：opencode serve 暂不可达，后台轮询等待重连")
+
+    async def _serve_connect_loop(self):
+        """serve 未就绪时轮询探测，成功后转正式监听任务（serve 可能晚于插件启动）"""
+        try:
+            while self._serve_task is None:
+                await asyncio.sleep(10)
+                if not self.serve or await asyncio.to_thread(self.serve.probe):
+                    break
+            if self.serve and self._serve_task is None:
+                self._serve_task = asyncio.create_task(
+                    self.serve.listen_loop(self._on_perm_request, self._loop)
+                )
+                logger.info(f"状态同步：已连接 opencode serve ({self.serve.base_url})")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"状态同步：serve 重试连接失败: {e}")
 
     @filter.on_plugin_unloaded()
     async def on_plugin_unloaded(self):
-        for task in (self._task, self._change_task, self._perm_task, self._serve_task):
+        for task in (self._task, self._change_task, self._perm_task, self._serve_task, self._serve_retry_task):
             if task:
                 task.cancel()
         self._task = None
         self._change_task = None
         self._perm_task = None
         self._serve_task = None
+        self._serve_retry_task = None
         await self.monitor.close_all()
 
     async def _perm_loop(self):
@@ -373,11 +453,54 @@ class StatusSyncPlugin(Star):
                         f"[权限] {ev.source}: {ev.tool} 请求执行「{ev.pattern}」"
                         f" → {ev.action}"
                     )
+                    if ev.pid and self.serve:
+                        # asking 行：注册到 serve 挂起审批，实现日志→现场放行桥接
+                        await self._register_perm_from_log(ev)
+                        text += (
+                            f"\n权限ID: {ev.pid}"
+                            f"\n回复「同意 {ev.pid}」现场放行，或「拒绝 {ev.pid}」阻止"
+                        )
                     await self._broadcast(text)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
                 logger.exception("权限事件监控失败")
+
+    async def _register_perm_from_log(self, ev):
+        """把日志 asking 行（带权限 ID）桥接为 serve 挂起请求，供群回复审批"""
+        if not ev.pid or ev.pid in self.serve.pending:
+            return
+        sid = await self._resolve_perm_session(ev.ts)
+        if not sid:
+            return
+        self.serve.pending[ev.pid] = PermRequest(
+            session_id=sid, permission_id=ev.pid, tool=ev.tool, detail=ev.pattern
+        )
+
+    async def _resolve_perm_session(self, ts: str) -> str:
+        """权限询问时刻 → 归属 serve 会话：取 created 最晚且早于询问时刻的会话"""
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00") if ts.endswith("Z") else ts)
+            limit_ms = int(dt.timestamp() * 1000)
+        except ValueError:
+            return ""
+        try:
+            r = await asyncio.to_thread(
+                self.serve._get_requests().get,
+                self.serve.base_url + "/session",
+                timeout=10,
+                headers=self.serve.auth,
+            )
+            if r.status_code != 200:
+                return ""
+            # serve 按 created 降序返回，首个 created < 询问时刻即最近创建的任务会话
+            for s in r.json():
+                t = s.get("time") or {}
+                if int(t.get("created", 0)) < limit_ms:
+                    return str(s.get("id", ""))
+        except Exception:  # noqa: BLE001
+            return ""
+        return ""
 
     async def _poll_loop(self):
         while True:

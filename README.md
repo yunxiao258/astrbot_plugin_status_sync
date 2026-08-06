@@ -156,7 +156,7 @@ SSH 密码、WinRM 密码、HTTP token 等敏感字段**不要明文**写在 `da
 | `report_enabled` | 是否定时自动播报 |
 | `state_change_report` | 状态变化即时播报（启动/停止通知，默认开） |
 | `state_change_interval_seconds` | 状态变化检测间隔（秒，默认 60，最小 10） |
-| `report_groups` | 播报目标 UMO（如 `default:GroupMessage:1102410958`），逗号分隔；留空播到最近使用 `/机器状态` 的会话 |
+| `report_groups` | 播报目标 UMO（如 `default:GroupMessage:1234567890`），逗号分隔；留空播到最近使用 `/机器状态` 的会话 |
 | `status_file_enabled` | 是否启用状态文件输出 |
 | `status_file` | 状态文件路径（相对插件目录，默认 `data/status_sync.json`），文件名作为各格式文件的基础名 |
 | `file_formats` | 生成的文件格式（`json/md/txt/csv`，逗号分隔，默认全部；留空不生成文件） |

@@ -266,7 +266,7 @@ def test_detect_changes():
 
 def test_latest_activity():
     print("[最近活动]")
-    from formatter import _latest_activity, format_overview
+    from astrbot_plugin_status_sync.formatter import _latest_activity, format_overview
 
     t = {"name": "opencode", "running": True, "logs": ["line1", "活动内容测试"]}
     check("取最后一行", _latest_activity(t) == "活动内容测试")

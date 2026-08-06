@@ -48,7 +48,7 @@ class FakeContext:
 
 
 class FakeEvent:
-    def __init__(self, message_str, session="default:GroupMessage:1102410958"):
+    def __init__(self, message_str, session="default:GroupMessage:1234567890"):
         self.message_str = message_str
         self._session = session
         self.sent_text = None
@@ -127,7 +127,7 @@ def test_command_dispatch():
     plugin = make_plugin()
     t = asyncio.run(run_cmd(plugin, "机器状态"))
     check("裸命令返回概览", "机器状态概览" in t and "本机服务器" in t)
-    check("命令后记住会话", plugin._recent_sessions == ["default:GroupMessage:1102410958"])
+    check("命令后记住会话", plugin._recent_sessions == ["default:GroupMessage:1234567890"])
 
     t = asyncio.run(run_cmd(plugin, "/机器状态"))
     check("带斜杠命令返回概览", "机器状态概览" in t)
@@ -147,17 +147,17 @@ def test_command_dispatch():
     check("reload 提示", "已重新加载" in t)
 
     # report：播报到配置的群
-    plugin = make_plugin({"report_groups": "default:GroupMessage:1102410958"})
+    plugin = make_plugin({"report_groups": "default:GroupMessage:1234567890"})
     t = asyncio.run(run_cmd(plugin, "机器状态 report"))
     check("report 播报成功", t == "已播报状态报告")
     check("播报发送到目标群", len(plugin.context.sent) == 1
-          and plugin.context.sent[0][0] == "default:GroupMessage:1102410958")
+          and plugin.context.sent[0][0] == "default:GroupMessage:1234567890")
 
     # file：生成状态文件并按配置送达
     with tempfile.TemporaryDirectory() as d:
         plugin = make_plugin({
             "status_file": os.path.join(d, "out", "status.json"),
-            "report_groups": "default:GroupMessage:1102410958",
+            "report_groups": "default:GroupMessage:1234567890",
         })
         t = asyncio.run(run_cmd(plugin, "机器状态 file"))
         check("状态文件生成提示", "状态文件已生成" in t and "文件(json)" in t)
@@ -174,7 +174,7 @@ def test_command_dispatch():
     with tempfile.TemporaryDirectory() as d:
         plugin = make_plugin({
             "status_file": os.path.join(d, "out", "status.json"),
-            "report_groups": "default:GroupMessage:1102410958",
+            "report_groups": "default:GroupMessage:1234567890",
         })
         t = asyncio.run(run_cmd(plugin, "机器状态 file md full"))
         check("指定格式提示", "文件(md)" in t and "文件(json)" not in t)
@@ -198,7 +198,7 @@ def test_file_delivery():
             "status_file": os.path.join(d, "out", "status.json"),
             "file_delivery": "local",
             "file_formats": "md",
-            "report_groups": "default:GroupMessage:1102410958",
+            "report_groups": "default:GroupMessage:1234567890",
         })
         t = asyncio.run(run_cmd(plugin, "机器状态 file"))
         check("仅本地提示", "已存本地" in t and "文件(" not in t)
@@ -207,7 +207,7 @@ def test_file_delivery():
     # 仅文本消息：不生成文件
     plugin = make_plugin({
         "file_delivery": "text",
-        "report_groups": "default:GroupMessage:1102410958",
+        "report_groups": "default:GroupMessage:1234567890",
     })
     t = asyncio.run(run_cmd(plugin, "机器状态 file"))
     check("仅文本提示", "文本" in t and "已存本地" not in t)
@@ -217,7 +217,7 @@ def test_file_delivery():
     plugin = make_plugin({
         "file_formats": "",
         "file_delivery": "file,local",
-        "report_groups": "default:GroupMessage:1102410958",
+        "report_groups": "default:GroupMessage:1234567890",
     })
     t = asyncio.run(run_cmd(plugin, "机器状态 file"))
     check("无格式提示", "未生成文件" in t)
@@ -226,7 +226,7 @@ def test_file_delivery():
     plugin = make_plugin({
         "file_delivery": "text",
         "file_detail": "full",
-        "report_groups": "default:GroupMessage:1102410958",
+        "report_groups": "default:GroupMessage:1234567890",
     })
     asyncio.run(run_cmd(plugin, "机器状态 file"))
     gaps = [c for (_, c) in plugin.context.sent]

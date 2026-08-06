@@ -30,6 +30,9 @@ _MSG_RE = re.compile(
     r" action\.permission=(?P<ap>\S+) action\.action=(?P<action>\S+)"
     r"( action\.pattern=(?P<apat>\S+))?"
 )
+_ASKING_RE = re.compile(
+    r"asking id=(?P<pid>\S+) permission=(?P<tool>\S+) patterns=(?P<patterns>.+)$"
+)
 
 
 @dataclass
@@ -42,17 +45,54 @@ class PermEvent:
     pattern: str
     action: str
     raw: str
+    pid: str = ""  # 挂起权限请求 ID（asking 行，serve 批准用）
 
 
 def parse_eval_line(line: str, source: str = "") -> PermEvent | None:
-    """解析 opencode 日志中的权限评估行，无法解析返回 None"""
+    """解析 opencode 日志中的权限评估行，无法解析返回 None。
+
+    两种格式：
+    - evaluated: timestamp=... message=evaluated permission=... action.action=ask|allow|deny
+    - asking:    timestamp=... message=asking id=per_xxx permission=... patterns=[...]
+      （asking 行表示有请求正在挂起等待批准，从中提取权限 ID 供 serve 远程批准）
+    """
     m = _EVAL_RE.search(line)
     if not m:
         return None
     msg = m.group("msg")
     mm = _MSG_RE.search(msg)
+    pid = ""
     if not mm:
-        return None
+        # asking 行：带挂起权限 ID
+        am = _ASKING_RE.search(msg)
+        if not am:
+            return None
+        mm = am
+        pid = am.group("pid")
+        pattern = am.group("patterns").strip()
+        # 剥掉日志 C 转义引号后按 JSON 数组/字符串解码
+        pattern = pattern.replace('\\"', '"')
+        if len(pattern) >= 2 and pattern[0] == pattern[-1] == '"':
+            try:
+                pattern = json.loads(pattern)
+            except json.JSONDecodeError:
+                pattern = pattern[1:-1]
+        if len(pattern) >= 2 and pattern[0] == "[" and pattern[-1] == "]":
+            try:
+                decoded = json.loads(pattern)
+                if isinstance(decoded, list):
+                    pattern = ", ".join(str(x) for x in decoded)
+            except json.JSONDecodeError:
+                pass
+        return PermEvent(
+            ts=m.group("ts"),
+            source=source,
+            tool=am.group("tool"),
+            pattern=pattern,
+            action="ask",
+            raw=line.strip(),
+            pid=pid,
+        )
     pattern = mm.group("pattern")
     if pattern.startswith('"') and pattern.endswith('"'):
         try:
@@ -408,7 +448,17 @@ class ServeClient:
                 timeout=10,
                 headers=self.auth,
             )
-            ok = r.status_code == 200 and r.json().get("result", True) is not False
+            ok = r.status_code == 200
+            if ok:
+                # serve 可能返回裸 true/false 或 {"result": ...}
+                try:
+                    body = r.json()
+                except ValueError:
+                    body = None
+                if body is False or (
+                    isinstance(body, dict) and body.get("result", True) is False
+                ):
+                    ok = False
             if ok:
                 self.pending.pop(permission_id, None)
             return ok
