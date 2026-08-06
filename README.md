@@ -147,6 +147,44 @@ SSH 密码、WinRM 密码、HTTP token 等敏感字段**不要明文**写在 `da
    插件连接 `opencode serve` 的 HTTP API，权限请求发生时立即转发到群，
    管理员回复 `/机器状态 同意 <ID>` 或 `/机器状态 拒绝 <ID>` 直接处理**当前挂起**的请求。
 
+## 与 astrbot_plugin_remote_task 联动
+
+配合 [astrbot_plugin_remote_task](https://github.com/yunxiao258/astrbot_plugin_remote_task)
+（群内下发任务给 opencode 执行），本插件提供**任务权限现场审批闭环**：
+
+### 场景
+
+remote_task 下发的任务执行中，opencode 若需要对某工具请求权限（`ask`），
+会话会挂起等待；此时通过本插件在群内直接批准，任务自动继续，无需登录机器。
+
+### 流程
+
+1. remote_task 任务触发 `ask` 权限 → opencode 挂起该请求，同时写入权限日志
+2. 本插件轮询日志捕获 `asking id=per_xxx ...` 行，把权限 ID 桥接为挂起请求，
+   并向群播报 `[权限] ... 权限ID: per_xxx`，提示「回复 同意 <ID> 现场放行」
+3. 管理员回复 `/机器状态 同意 <ID>`（或 `/机器状态 拒绝 <ID>`）
+4. 本插件调用 `POST /session/{sid}/permissions/{id}` 放行/拒绝
+5. 任务继续执行，remote_task 随后广播完成结果
+
+### 前提
+
+- 本插件与 remote_task **共用同一个 opencode serve**（`opencode_serve_url`
+  与 remote_task 的 `serve_url` 一致，如 `http://127.0.0.1:4096`）
+- `permission_report` 保持开启；`permission_forward_level` 包含 `ask`
+- opencode 全局配置 `~/.config/opencode/opencode.jsonc` 中相关工具为
+  `ask`（默认敏感工具即 ask；也可用 `/机器状态 权限询问 <工具> *` 显式设置）
+- 会话归属按"最近创建的 serve 会话"匹配（remote_task 每次任务新建会话，
+  因此单任务场景始终准确；并发多任务时取最近一个）
+
+### 说明
+
+- 日志桥接解决的是 serve 不推送 `permission.request` SSE 事件的兼容问题，
+  通过 opencode 日志 `asking id=` 行拿到权限 ID，实现与「远程规则管理」、
+  「serve 模式实时批准」等效的群内审批
+- 只播报不审批时：本插件单独使用也可监控/通知所有 opencode 权限事件
+- 远程规则管理（`权限允许/拒绝/询问`）对**后续**请求生效（opencode 热加载），
+  与「现场放行」互补
+
 ## 插件配置
 
 | 配置项 | 说明 |
