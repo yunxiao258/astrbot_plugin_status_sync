@@ -1,4 +1,4 @@
-"""astrbot_plugin_status_sync 集成测试：命令分发、错误分支、播报逻辑。
+﻿"""astrbot_plugin_status_sync 集成测试：命令分发、错误分支、播报逻辑。
 
 运行：python test_integration.py
 需要 venv 中的 astrbot 包（@register 装饰器依赖），不连接远程机器。
@@ -142,22 +142,43 @@ def test_command_dispatch():
     t = asyncio.run(run_cmd(plugin, "机器状态 不存在的机器"))
     check("未找到机器提示", "未找到机器" in t)
 
-    # reload
+    # reload（管理命令，需 admin_umos）
+    plugin = make_plugin({"admin_umos": "default:GroupMessage:1234567890"})
     t = asyncio.run(run_cmd(plugin, "机器状态 reload"))
     check("reload 提示", "已重新加载" in t)
 
-    # report：播报到配置的群
-    plugin = make_plugin({"report_groups": "default:GroupMessage:1234567890"})
+    # 无白名单时管理命令被拒，只读命令仍可用
+    plugin = make_plugin({})
+    t = asyncio.run(run_cmd(plugin, "机器状态 reload"))
+    check("无白名单拒绝 reload", "未配置管理员白名单" in t)
+    t = asyncio.run(run_cmd(plugin, "机器状态 加密串 密码"))
+    check("无白名单拒绝加密串", "未配置管理员白名单" in t)
+    t = asyncio.run(run_cmd(plugin, "机器状态"))
+    check("无白名单仍可查看概览", "机器状态概览" in t)
+
+    # 非白名单会话（不同 UMO）被拒
+    plugin = make_plugin({"admin_umos": "default:GroupMessage:9999999999"})
+    t = asyncio.run(run_cmd(plugin, "机器状态 reload"))
+    check("非白名单会话拒绝 reload", "没有执行此命令的权限" in t)
+    t = asyncio.run(run_cmd(plugin, "机器状态 本机服务器"))
+    check("非白名单会话仍可查详情", "本机服务器" in t and "opencode" in t)
+
+    # report：播报到配置的群（管理命令）
+    plugin = make_plugin({
+        "report_groups": "default:GroupMessage:1234567890",
+        "admin_umos": "default:GroupMessage:1234567890",
+    })
     t = asyncio.run(run_cmd(plugin, "机器状态 report"))
     check("report 播报成功", t == "已播报状态报告")
     check("播报发送到目标群", len(plugin.context.sent) == 1
           and plugin.context.sent[0][0] == "default:GroupMessage:1234567890")
 
-    # file：生成状态文件并按配置送达
+    # file：生成状态文件并按配置送达（管理命令）
     with tempfile.TemporaryDirectory() as d:
         plugin = make_plugin({
             "status_file": os.path.join(d, "out", "status.json"),
             "report_groups": "default:GroupMessage:1234567890",
+            "admin_umos": "default:GroupMessage:1234567890",
         })
         t = asyncio.run(run_cmd(plugin, "机器状态 file"))
         check("状态文件生成提示", "状态文件已生成" in t and "文件(json)" in t)
@@ -170,11 +191,12 @@ def test_command_dispatch():
         check("文件消息送达", len(file_msgs) == 4)
         check("本地文件落盘", os.path.exists(os.path.join(d, "out", "status.md")))
 
-    # file 带参数：仅 md + 全量
+    # file 带参数：仅 md + 全量（管理命令）
     with tempfile.TemporaryDirectory() as d:
         plugin = make_plugin({
             "status_file": os.path.join(d, "out", "status.json"),
             "report_groups": "default:GroupMessage:1234567890",
+            "admin_umos": "default:GroupMessage:1234567890",
         })
         t = asyncio.run(run_cmd(plugin, "机器状态 file md full"))
         check("指定格式提示", "文件(md)" in t and "文件(json)" not in t)
@@ -199,6 +221,7 @@ def test_file_delivery():
             "file_delivery": "local",
             "file_formats": "md",
             "report_groups": "default:GroupMessage:1234567890",
+            "admin_umos": "default:GroupMessage:1234567890",
         })
         t = asyncio.run(run_cmd(plugin, "机器状态 file"))
         check("仅本地提示", "已存本地" in t and "文件(" not in t)
@@ -208,6 +231,7 @@ def test_file_delivery():
     plugin = make_plugin({
         "file_delivery": "text",
         "report_groups": "default:GroupMessage:1234567890",
+        "admin_umos": "default:GroupMessage:1234567890",
     })
     t = asyncio.run(run_cmd(plugin, "机器状态 file"))
     check("仅文本提示", "文本" in t and "已存本地" not in t)
@@ -218,6 +242,7 @@ def test_file_delivery():
         "file_formats": "",
         "file_delivery": "file,local",
         "report_groups": "default:GroupMessage:1234567890",
+        "admin_umos": "default:GroupMessage:1234567890",
     })
     t = asyncio.run(run_cmd(plugin, "机器状态 file"))
     check("无格式提示", "未生成文件" in t)
@@ -227,6 +252,7 @@ def test_file_delivery():
         "file_delivery": "text",
         "file_detail": "full",
         "report_groups": "default:GroupMessage:1234567890",
+        "admin_umos": "default:GroupMessage:1234567890",
     })
     asyncio.run(run_cmd(plugin, "机器状态 file"))
     gaps = [c for (_, c) in plugin.context.sent]
@@ -263,6 +289,25 @@ def test_permission_commands():
 
     with tempfile.TemporaryDirectory() as d:
         plugin = make_perm_plugin(d)
+        # 未配置白名单时管理命令被拒绝
+        t = asyncio.run(run_cmd(plugin, "机器状态 权限允许 bash git push *"))
+        check("无白名单时拒绝管理命令", "未配置管理员白名单" in t)
+        t = asyncio.run(run_cmd(plugin, "机器状态 权限"))
+        check("无白名单时拒绝权限查询", "未配置管理员白名单" in t)
+        t = asyncio.run(run_cmd(plugin, "机器状态 reload"))
+        check("无白名单时拒绝 reload", "未配置管理员白名单" in t)
+
+        # 配置白名单后：非白名单会话仍被拒绝
+        plugin = make_perm_plugin(d)
+        plugin.cfg.kw["admin_umos"] = "default:GroupMessage:8888888888"
+        t = asyncio.run(run_cmd(plugin, "机器状态 权限允许 bash git push *"))
+        check("非白名单会话被拒绝", "没有执行此命令的权限" in t)
+        t = asyncio.run(run_cmd(plugin, "机器状态"))
+        check("只读查询对普通成员开放", "机器状态概览" in t)
+
+        # 白名单会话（FakeEvent 默认 default:GroupMessage:1234567890）
+        plugin = make_perm_plugin(d)
+        plugin.cfg.kw["admin_umos"] = "default:GroupMessage:1234567890"
         t = asyncio.run(run_cmd(plugin, "机器状态 权限"))
         check("权限无规则提示", "无自定义规则" in t)
         t = asyncio.run(run_cmd(plugin, "机器状态 权限允许 bash git push *"))
@@ -299,7 +344,7 @@ def test_encrypt_command():
         await plugin.status_cmd(ev)
         return ev.sent_text or ""
 
-    plugin = make_plugin({})
+    plugin = make_plugin({"admin_umos": "default:GroupMessage:1234567890"})
     t = asyncio.run(run_cmd(plugin, "机器状态 加密串 我的密码"))
     check("加密命令有输出", "dpapi:" in t or "仅支持 Windows" in t)
     if "dpapi:" in t:
@@ -348,3 +393,4 @@ if __name__ == "__main__":
     test_disabled()
     print(f"\n===== 结果: {PASS} PASS / {FAIL} FAIL =====")
     sys.exit(1 if FAIL else 0)
+

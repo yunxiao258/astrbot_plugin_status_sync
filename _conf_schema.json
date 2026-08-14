@@ -4,6 +4,11 @@
     "type": "bool",
     "default": true
   },
+  "admin_umos": {
+    "description": "管理员会话 UMO 白名单（管理命令如 reload/file/权限/同意/拒绝/加密串 仅限此列表），多个用英文逗号分隔，如 default:GroupMessage:1234567890；留空则管理命令全部不可用",
+    "type": "string",
+    "default": ""
+  },
   "poll_interval_minutes": {
     "description": "定时自动播报间隔（分钟），最小 1",
     "type": "int",

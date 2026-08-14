@@ -43,7 +43,7 @@ FILE_DETAILS = ("summary", "full")
     "astrbot_plugin_status_sync",
     "yunxiao258",
     "同步电脑端 opencode / mimocode / openclaw 等程序运行状态",
-    "1.0.0",
+    "1.1.0",
     repo="https://github.com/yunxiao258/astrbot_plugin_status_sync",
 )
 class StatusSyncPlugin(Star):
@@ -76,6 +76,26 @@ class StatusSyncPlugin(Star):
 
     # ---------- 命令 ----------
 
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        """是否管理员会话（admin_umos 白名单）"""
+        umos = self._admin_umos()
+        return str(event.session) in umos if umos else False
+
+    def _admin_umos(self) -> list[str]:
+        v = self.cfg.get("admin_umos", "")
+        if isinstance(v, str):
+            return [x.strip() for x in v.split(",") if x.strip()]
+        return list(v or [])
+
+    def _deny(self) -> str:
+        umos = self._admin_umos()
+        if not umos:
+            return (
+                "本插件未配置管理员白名单（admin_umos），管理命令不可用。\n"
+                "请在插件配置中填写 admin_umos（如 default:GroupMessage:1234567890）后重启 AstrBot。"
+            )
+        return "你没有执行此命令的权限（不在 admin_umos 白名单内）"
+
     @filter.command("机器状态", alias={"sync", "状态同步"})
     async def status_cmd(self, event: AstrMessageEvent):
         """查询机器状态：/机器状态、/机器状态 <机器名>、/机器状态 file、/机器状态 report、/机器状态 reload"""
@@ -99,9 +119,13 @@ class StatusSyncPlugin(Star):
         tokens = sub.split()
         cmd = tokens[0]
         if cmd == "reload":
+            if not self._is_admin(event):
+                return self._deny()
             n = self.monitor.reload()
             return f"机器配置已重新加载，共 {n} 台"
         if cmd == "file":
+            if not self._is_admin(event):
+                return self._deny()
             states = await self.monitor.check_all()
             fmt_arg = tokens[1] if len(tokens) > 1 else None
             det_arg = tokens[2] if len(tokens) > 2 else None
@@ -112,19 +136,31 @@ class StatusSyncPlugin(Star):
             )
             return f"状态文件已生成并送达（{done}）"
         if cmd == "report":
+            if not self._is_admin(event):
+                return self._deny()
             states = await self.monitor.check_all()
             await self._broadcast(format_overview(states))
             return "已播报状态报告"
         if cmd == "权限":
+            if not self._is_admin(event):
+                return self._deny()
             return await self._handle_permission(tokens)
         if cmd.startswith("权限") and len(cmd) > 2:
             # 兼容连写形式：/机器状态 权限允许 bash git push *
+            if not self._is_admin(event):
+                return self._deny()
             return await self._handle_permission(["权限", cmd[2:]] + tokens[1:])
         if cmd in ("同意", "批准", "allow"):
+            if not self._is_admin(event):
+                return self._deny()
             return await self._handle_approve(tokens, approve=True)
         if cmd in ("拒绝", "驳回", "deny"):
+            if not self._is_admin(event):
+                return self._deny()
             return await self._handle_approve(tokens, approve=False)
         if cmd in ("加密串", "encrypt"):
+            if not self._is_admin(event):
+                return self._deny()
             return await self._handle_encrypt(tokens)
         states = await self.monitor.check_all()
         st = next((s for s in states if s.get("name") == sub), None)
