@@ -34,6 +34,7 @@ from .formatter import (
 )
 from .monitor import Monitor
 from .perm import PermissionMonitor, PermRequest, RuleManager, ServeClient
+from .ws_server import WsHub
 
 FILE_FORMATS = ("json", "md", "txt", "csv")
 FILE_DETAILS = ("summary", "full")
@@ -43,7 +44,7 @@ FILE_DETAILS = ("summary", "full")
     "astrbot_plugin_status_sync",
     "yunxiao258",
     "同步电脑端 opencode / mimocode / openclaw 等程序运行状态",
-    "1.1.1",
+    "1.1.2",
     repo="https://github.com/yunxiao258/astrbot_plugin_status_sync",
 )
 class StatusSyncPlugin(Star):
@@ -57,8 +58,14 @@ class StatusSyncPlugin(Star):
         self._perm_task: asyncio.Task | None = None
         self._serve_task: asyncio.Task | None = None
         self._serve_retry_task: asyncio.Task | None = None
+        self._ws_task: asyncio.Task | None = None
         self._recent_sessions: list[str] = []
         self._loop = asyncio.get_event_loop()
+        # WebSocket 实时推送
+        self._ws = WsHub(
+            config.get("ws_port", 8765),
+            config.get("ws_token", "") or "",
+        )
         # 权限远程控制
         self.perm_monitor = PermissionMonitor(config, self.plugin_dir)
         cfg_file = config.get("opencode_config_file", "%USERPROFILE%/.config/opencode/opencode.jsonc")
@@ -435,6 +442,10 @@ class StatusSyncPlugin(Star):
             else:
                 self._serve_retry_task = asyncio.create_task(self._serve_connect_loop())
                 logger.warning("状态同步：opencode serve 暂不可达，后台轮询等待重连")
+        if self.cfg.get("ws_enabled", False) and self._ws_task is None:
+            if await self._ws.start():
+                self._ws_task = self._ws._task
+                logger.info(f"状态同步：WebSocket 实时推送已启用 (ws_port={self._ws.port})")
 
     async def _serve_connect_loop(self):
         """serve 未就绪时轮询探测，成功后转正式监听任务（serve 可能晚于插件启动）"""
@@ -455,7 +466,7 @@ class StatusSyncPlugin(Star):
 
     @filter.on_plugin_unloaded()
     async def on_plugin_unloaded(self):
-        for task in (self._task, self._change_task, self._perm_task, self._serve_task, self._serve_retry_task):
+        for task in (self._task, self._change_task, self._perm_task, self._serve_task, self._serve_retry_task, self._ws_task):
             if task:
                 task.cancel()
         self._task = None
@@ -463,6 +474,8 @@ class StatusSyncPlugin(Star):
         self._perm_task = None
         self._serve_task = None
         self._serve_retry_task = None
+        self._ws_task = None
+        await self._ws.stop()
         await self.monitor.close_all()
 
     async def _perm_loop(self):
@@ -553,6 +566,13 @@ class StatusSyncPlugin(Star):
                     continue
                 states = await self.monitor.check_all()
                 await self._generate_and_deliver(states)
+                # WebSocket 推送全量状态快照
+                if self._ws.running:
+                    self._ws.broadcast({
+                        "type": "status",
+                        "time": datetime.now().isoformat(),
+                        "machines": states,
+                    })
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
@@ -571,6 +591,14 @@ class StatusSyncPlugin(Star):
                 changes = await self.monitor.detect_changes()
                 if changes:
                     await self._broadcast("[状态同步] " + "；".join(changes))
+                    # WebSocket 实时推送状态变化
+                    if self._ws.running:
+                        self._ws.broadcast({
+                            "type": "state_change",
+                            "time": datetime.now().isoformat(),
+                            "changes": changes,
+                            "machines": await self.monitor.check_all(),
+                        })
                     if "on_change" in self._split_cfg(
                         "file_generate_timing", "manual,scheduled,on_change"
                     ):

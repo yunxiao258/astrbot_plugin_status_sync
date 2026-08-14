@@ -64,6 +64,21 @@
     "type": "string",
     "default": "manual,scheduled,on_change"
   },
+  "ws_enabled": {
+    "description": "是否启用 WebSocket 实时推送（需要 websockets 库；状态变化与定时快照推送给订阅端）",
+    "type": "bool",
+    "default": false
+  },
+  "ws_port": {
+    "description": "WebSocket 监听端口",
+    "type": "int",
+    "default": 8765
+  },
+  "ws_token": {
+    "description": "WebSocket 访问令牌（客户端需 ws://host:port/?token=<令牌> 连接；留空则不鉴权，仅建议内网使用）",
+    "type": "string",
+    "default": ""
+  },
   "permission_report": {
     "description": "是否把权限事件转发到群（opencode 日志监控 + serve 请求转发）",
     "type": "bool",
