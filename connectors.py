@@ -170,8 +170,28 @@ class SshConnector(BaseConnector):
             _, stdout, stderr = await asyncio.to_thread(
                 self._client.exec_command, script, timeout=timeout
             )
-            out = await asyncio.to_thread(stdout.read)
-            err = await asyncio.to_thread(stderr.read)
+            # stdout/stderr 读取本身无超时（exec_command 的 timeout 只管建通道），
+            # 远端命令挂起时会永久阻塞线程 → 用 wait_for 强制兜底
+            read_timeout = max(5, timeout + 10)
+            try:
+                out, err = await asyncio.wait_for(
+                    asyncio.gather(
+                        asyncio.to_thread(stdout.read),
+                        asyncio.to_thread(stderr.read),
+                    ),
+                    timeout=read_timeout,
+                )
+            except asyncio.TimeoutError:
+                # 命令挂起：强制关闭通道与连接，避免线程泄漏
+                try:
+                    channel = stdout.channel if hasattr(stdout, "channel") else None
+                    if channel is not None:
+                        await asyncio.to_thread(channel.close)
+                except Exception:  # noqa: BLE001
+                    pass
+                await self.close()
+                logger.warning(f"SSH {self.host} 命令执行超时（{read_timeout}s），已断开")
+                return "[SSH 命令超时]"
             return (out + err).decode("utf-8", "replace").strip()
 
     async def close(self):

@@ -280,6 +280,91 @@ def test_latest_activity():
     check("概览含最近活动", "最近在做啥" in ov)
 
 
+def test_auth():
+    """管理员白名单（admin_umos）授权逻辑"""
+    print("[授权白名单]")
+    import asyncio as _aio
+    from astrbot_plugin_status_sync.main import StatusSyncPlugin
+
+    # 插件 __init__ 需要当前事件循环（Python 3.12 主线程默认无 loop）
+    _aio.set_event_loop(_aio.new_event_loop())
+
+    class FakeEvent:
+        def __init__(self, session):
+            self.session = session
+
+    def make(cfg):
+        p = StatusSyncPlugin(context=None, config=cfg)
+        p._first_run = False
+        return p
+
+    p = make({"admin_umos": "default:GroupMessage:10001, default:PrivateMessage:20002"})
+    umos = p._admin_umos()
+    check("逗号分隔解析", umos == ["default:GroupMessage:10001", "default:PrivateMessage:20002"])
+    check("白名单内群会话放行", p._is_admin(FakeEvent("default:GroupMessage:10001")))
+    check("白名单内私聊放行", p._is_admin(FakeEvent("default:PrivateMessage:20002")))
+    check("非白名单拒绝", not p._is_admin(FakeEvent("default:GroupMessage:99999")))
+    check("拒绝文案不含未配置提示", "未配置" not in p._deny())
+
+    p2 = make({"admin_umos": ["onebot:GroupMessage:123"]})
+    check("list 类型配置解析", p2._admin_umos() == ["onebot:GroupMessage:123"])
+    check("list 配置命中", p2._is_admin(FakeEvent("onebot:GroupMessage:123")))
+
+    p3 = make({"admin_umos": ""})
+    check("未配置时任何人不可管理", not p3._is_admin(FakeEvent("default:GroupMessage:10001")))
+    check("未配置拒绝文案提示配置", "admin_umos" in p3._deny())
+
+    p4 = make({})
+    check("缺失配置键等价未配置", p4._admin_umos() == [])
+
+
+def test_lifecycle():
+    """Monitor 生命周期：配置加载、单机检测、未知类型容错"""
+    print("[监控生命周期]")
+    import tempfile as _tf
+    import asyncio as _aio
+
+    from astrbot_plugin_status_sync.monitor import Monitor
+
+    tmp = _tf.mkdtemp(prefix="status_sync_test_")
+    cfg_path = os.path.join(tmp, "machines.json")
+
+    # 1. 配置文件不存在 → 使用内置默认
+    mon = Monitor(config={
+        "machines": "", "machines_config_file": cfg_path, "admin_umos": "",
+    }, plugin_dir=tmp)
+    n = mon.reload()
+    check("缺配置时加载内置默认", n >= 1)
+
+    # 2. 自定义配置：local + 未知类型
+    with open(cfg_path, "w", encoding="utf-8") as fh:
+        json.dump({"machines": [
+            {"name": "本机", "type": "local", "targets": [{"name": "python", "patterns": ["python"]}]},
+            {"name": "怪机器", "type": "unknown_type"},
+        ]}, fh, ensure_ascii=False)
+    mon.reload()
+    check("载入自定义机器数", len(mon.machines) == 2)
+
+    # 3. 单机检测：local 成功、未知类型返回错误但不抛
+    res_local = _aio.run(mon.check_machine(mon.machines[0]))
+    check("本地机器检测 ok", res_local.get("ok"))
+    check("本地检测含 targets", "targets" in res_local and res_local.get("ok"))
+
+    res_weird = _aio.run(mon.check_machine(mon.machines[1]))
+    check("未知类型返回错误标记", res_weird.get("ok") is False)
+    check("未知类型带错误信息", "未知机器类型" in (res_weird.get("error") or ""))
+
+    # 4. 并发 check_all：单台失败不影响整体
+    res_all = _aio.run(mon.check_all())
+    check("check_all 返回全部机器", len(res_all) == 2)
+    check("并发中失败机器被隔离", res_all[0].get("ok") and not res_all[1].get("ok"))
+
+    # 5. 关闭连接器幂等
+    _aio.run(mon.close_all())
+    _aio.run(mon.close_all())
+    check("close_all 幂等", mon._connectors == {})
+
+
 if __name__ == "__main__":
     print("=== 状态同步插件单元测试 ===")
     test_match_process()
@@ -292,5 +377,7 @@ if __name__ == "__main__":
     test_local_check()
     test_detect_changes()
     test_latest_activity()
+    test_auth()
+    test_lifecycle()
     print(f"\n===== 结果: {PASS} PASS / {FAIL} FAIL =====")
     sys.exit(1 if FAIL else 0)

@@ -386,14 +386,22 @@ class Monitor:
 
     @staticmethod
     def _parse_win_json(out: str) -> dict:
-        """解析 Windows PowerShell 输出的 JSON"""
+        """解析 Windows PowerShell 输出的 JSON（解析失败不崩溃，返回空数据）"""
+        data = None
         try:
             data = json.loads(out)
         except json.JSONDecodeError:
             start = out.find("{")
-            if start < 0:
-                return {"processes": [], "resources": {"cpu": 0, "mem_total": 0, "mem_used": 0}}
-            data = json.loads(out[start:])
+            if start >= 0:
+                # 截取到最后一个 '}' 再解析，避免前导噪声/截断导致 ValueError
+                end = out.rfind("}")
+                candidate = out[start:] if end < 0 else out[start:end + 1]
+                try:
+                    data = json.loads(candidate)
+                except (json.JSONDecodeError, ValueError):
+                    data = None
+        if not isinstance(data, dict):
+            return {"processes": [], "resources": {"cpu": 0, "mem_total": 0, "mem_used": 0}}
         processes = []
         for p in data.get("processes") or []:
             processes.append({

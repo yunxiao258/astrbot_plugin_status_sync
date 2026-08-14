@@ -9,6 +9,6 @@ help: |
   - /机器状态 report：立即向播报目标发送一次状态报告
   定时自动播报默认每 30 分钟一次，可在插件配置中调整。
   机器配置见 data/machines.json（支持 local / ssh / winrm / http 四种类型）。
-version: 1.1.0
+version: 1.1.1
 author: yunxiao258
 repo: https://github.com/yunxiao258/astrbot_plugin_status_sync
