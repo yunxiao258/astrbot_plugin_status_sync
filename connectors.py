@@ -217,6 +217,7 @@ class WinrmConnector(BaseConnector):
         self.transport = cfg.get("transport", "ntlm")
         self.https = bool(cfg.get("https", False))
         self._session = None
+        self._lock = asyncio.Lock()
 
     def _ensure(self):
         if self._session is not None:
@@ -231,15 +232,26 @@ class WinrmConnector(BaseConnector):
         return self._session
 
     async def run(self, script: str, timeout: int = 30) -> str:
-        def _run():
-            s = self._ensure()
-            return s.run_ps(script)
+        async with self._lock:
+            def _run():
+                s = self._ensure()
+                return s.run_ps(script)
 
-        r = await asyncio.to_thread(_run)
-        if r.status_code != 0:
-            err = r.std_err.decode("utf-8", "replace")[:200]
-            logger.warning(f"WinRM {self.host} 脚本返回码 {r.status_code}: {err}")
-        return r.std_out.decode("utf-8", "replace").strip()
+            # 远端脚本挂起时线程会永久阻塞 → wait_for 强制兜底
+            read_timeout = max(5, timeout + 10)
+            try:
+                r = await asyncio.wait_for(
+                    asyncio.to_thread(_run), timeout=read_timeout
+                )
+            except asyncio.TimeoutError:
+                # 强制重置会话，避免后续请求复用挂起会话
+                self._session = None
+                logger.warning(f"WinRM {self.host} 命令执行超时（{read_timeout}s），已重置会话")
+                return "[WinRM 命令超时]"
+            if r.status_code != 0:
+                err = r.std_err.decode("utf-8", "replace")[:200]
+                logger.warning(f"WinRM {self.host} 脚本返回码 {r.status_code}: {err}")
+            return r.std_out.decode("utf-8", "replace").strip()
 
 
 class HttpConnector(BaseConnector):

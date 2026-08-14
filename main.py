@@ -44,7 +44,7 @@ FILE_DETAILS = ("summary", "full")
     "astrbot_plugin_status_sync",
     "yunxiao258",
     "同步电脑端 opencode / mimocode / openclaw 等程序运行状态",
-    "1.1.2",
+    "1.1.3",
     repo="https://github.com/yunxiao258/astrbot_plugin_status_sync",
 )
 class StatusSyncPlugin(Star):
@@ -327,7 +327,8 @@ class StatusSyncPlugin(Star):
                 if sid:
                     seg = await AiocqhttpMessageEvent._parse_onebot_json(chain)
                     if not seg:
-                        return True
+                        # 解析失败：不能视为已发送，走 send_message 回退
+                        return False
                     if session.message_type == MessageType.GROUP_MESSAGE:
                         await plat.bot.send_group_msg(
                             group_id=int(session.session_id),

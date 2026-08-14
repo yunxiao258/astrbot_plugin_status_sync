@@ -159,8 +159,21 @@ class Monitor:
 
     def reload(self) -> int:
         """重新加载机器配置（/status reload 或配置变更后调用）"""
+        # 先关闭旧连接器，避免 reload 泄漏 SSH/WinRM 会话（close 为异步，调度到当前循环）
+        old_connectors = self._connectors
         self._connectors = {}
+        if old_connectors:
+            try:
+                loop = asyncio.get_event_loop()
+                for conn in old_connectors.values():
+                    loop.create_task(conn.close())
+            except RuntimeError:
+                pass  # 无事件循环：连接将在插件卸载 close_all 时清理
         self._last_signature = None
+        return self._load_machines()
+
+    def _load_machines(self) -> int:
+        """读取机器配置并更新 machines 列表，返回机器数量"""
         path = self.machines_config_path()
         try:
             with open(path, "r", encoding="utf-8") as fh:
