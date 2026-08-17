@@ -40,6 +40,14 @@ FILE_FORMATS = ("json", "md", "txt", "csv")
 FILE_DETAILS = ("summary", "full")
 
 
+def _cfg_int(cfg, key: str, default: int) -> int:
+    """防御性读取整数配置：脏值（如字符串/None）回退默认"""
+    try:
+        return int(cfg.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
 @register(
     "astrbot_plugin_status_sync",
     "yunxiao258",
@@ -58,6 +66,7 @@ class StatusSyncPlugin(Star):
         self._perm_task: asyncio.Task | None = None
         self._serve_task: asyncio.Task | None = None
         self._serve_retry_task: asyncio.Task | None = None
+        self._serve_init_task: asyncio.Task | None = None
         self._ws_task: asyncio.Task | None = None
         self._recent_sessions: list[str] = []
         self._loop = asyncio.get_event_loop()
@@ -216,9 +225,14 @@ class StatusSyncPlugin(Star):
             return "用法: /机器状态 同意 <权限ID> [always]"
         pid = tokens[1]
         remember = len(tokens) > 2 and tokens[2] == "always"
-        response = "once" if approve else "reject"
-        if remember:
+        # 拒绝时无论是否 always 都响应 reject（remember 仅控制是否记住），
+        # 修复拒绝+always 被反转成放行（always）的安全漏洞
+        if approve and remember:
             response = "always"
+        elif approve:
+            response = "once"
+        else:
+            response = "reject"
         self.serve.prune()
         req = self.serve.pending.get(pid)
         if not req:
@@ -421,43 +435,95 @@ class StatusSyncPlugin(Star):
 
     @filter.on_astrbot_loaded()
     async def on_astrbot_loaded(self):
+        self.initialize()
+
+    def initialize(self):
+        """插件热重载后启动全部后台任务（幂等；done_callback 记录异常防静默死亡）"""
         if not self.cfg.get("enabled", True):
             return
         self.monitor.reload()
         if self._task is None:
-            self._task = asyncio.create_task(self._poll_loop())
-            logger.info("状态同步：定时播报任务已启动")
+            self._task = self._spawn("播报", self._poll_loop)
         if self._change_task is None:
-            self._change_task = asyncio.create_task(self._change_loop())
-            logger.info("状态同步：状态变化检测任务已启动")
+            self._change_task = self._spawn("变化检测", self._change_loop)
         if self._perm_task is None:
             self.perm_monitor.load_cursor()
-            self._perm_task = asyncio.create_task(self._perm_loop())
-            logger.info("状态同步：权限事件监控任务已启动")
+            self._perm_task = self._spawn("权限监控", self._perm_loop)
         if self.serve is not None and self._serve_task is None:
-            if await asyncio.to_thread(self.serve.probe):
-                self._serve_task = asyncio.create_task(
-                    self.serve.listen_loop(self._on_perm_request, self._loop)
+            if self._serve_init_task is None:
+                self._serve_init_task = self._spawn(
+                    "serve 初始化", self._init_serve
                 )
-                logger.info(f"状态同步：已连接 opencode serve ({self.serve.base_url})")
-            else:
-                self._serve_retry_task = asyncio.create_task(self._serve_connect_loop())
-                logger.warning("状态同步：opencode serve 暂不可达，后台轮询等待重连")
         if self.cfg.get("ws_enabled", False) and self._ws_task is None:
-            if await self._ws.start():
+            if self._ws_start():
                 self._ws_task = self._ws._task
                 logger.info(f"状态同步：WebSocket 实时推送已启用 (ws_port={self._ws.port})")
+
+    async def _init_serve(self):
+        """异步初始化 serve 连接：探测可达则监听，否则进入重连循环（幂等）"""
+        try:
+            if self._serve_task is not None:
+                return
+            if await self._probe_serve_async():
+                self._serve_task = self._spawn(
+                    "serve 监听", self.serve.listen_loop, self._on_perm_request, self._loop
+                )
+                logger.info(f"状态同步：已连接 opencode serve ({self.serve.base_url})")
+            elif self._serve_retry_task is None:
+                self._serve_retry_task = self._spawn("serve 重连", self._serve_connect_loop)
+                logger.warning("状态同步：opencode serve 暂不可达，后台轮询等待重连")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"状态同步：serve 初始化失败: {e}")
+
+    def _spawn(self, name: str, coro, *args) -> asyncio.Task:
+        """创建后台任务并挂 done_callback：记录异常防止静默死亡"""
+        task = asyncio.create_task(coro(*args))
+
+        def _done(t: asyncio.Task):
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc:
+                logger.warning(f"状态同步：{name}任务异常退出: {exc}")
+
+        task.add_done_callback(_done)
+        return task
+
+    def _probe_serve(self) -> bool:
+        """同步探测 serve（阻塞调用，调用方自行保证不在事件循环内直接执行）"""
+        try:
+            return self.serve.probe()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"状态同步：探测 serve 失败: {e}")
+            return False
+
+    async def _probe_serve_async(self) -> bool:
+        """异步探测 serve（阻塞调用放入线程）"""
+        try:
+            return await asyncio.to_thread(self.serve.probe)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"状态同步：探测 serve 失败: {e}")
+            return False
+
+    def _ws_start(self) -> bool:
+        try:
+            return self._ws.start()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"状态同步：WebSocket 启动失败: {e}")
+            return False
 
     async def _serve_connect_loop(self):
         """serve 未就绪时轮询探测，成功后转正式监听任务（serve 可能晚于插件启动）"""
         try:
             while self._serve_task is None:
                 await asyncio.sleep(10)
-                if not self.serve or await asyncio.to_thread(self.serve.probe):
+                if not self.serve or await self._probe_serve_async():
                     break
             if self.serve and self._serve_task is None:
-                self._serve_task = asyncio.create_task(
-                    self.serve.listen_loop(self._on_perm_request, self._loop)
+                self._serve_task = self._spawn(
+                    "serve 监听", self.serve.listen_loop, self._on_perm_request, self._loop
                 )
                 logger.info(f"状态同步：已连接 opencode serve ({self.serve.base_url})")
         except asyncio.CancelledError:
@@ -467,7 +533,7 @@ class StatusSyncPlugin(Star):
 
     @filter.on_plugin_unloaded()
     async def on_plugin_unloaded(self):
-        for task in (self._task, self._change_task, self._perm_task, self._serve_task, self._serve_retry_task, self._ws_task):
+        for task in (self._task, self._change_task, self._perm_task, self._serve_task, self._serve_retry_task, self._serve_init_task, self._ws_task):
             if task:
                 task.cancel()
         self._task = None
@@ -475,14 +541,19 @@ class StatusSyncPlugin(Star):
         self._perm_task = None
         self._serve_task = None
         self._serve_retry_task = None
+        self._serve_init_task = None
         self._ws_task = None
         await self._ws.stop()
         await self.monitor.close_all()
 
     async def _perm_loop(self):
         """定期检查 opencode 日志中的权限评估事件并转发"""
-        interval = max(5, int(self.cfg.get("permission_check_interval_seconds", 30)))
         while True:
+            try:
+                # 每次循环重读配置，支持运行中调整且脏值不杀任务
+                interval = max(5, _cfg_int(self.cfg, "permission_check_interval_seconds", 30))
+            except Exception:  # noqa: BLE001
+                interval = 30
             await asyncio.sleep(interval)
             try:
                 if not self.cfg.get("permission_report", True):
@@ -554,7 +625,7 @@ class StatusSyncPlugin(Star):
 
     async def _poll_loop(self):
         while True:
-            minutes = max(1, int(self.cfg.get("poll_interval_minutes", 30)))
+            minutes = max(1, _cfg_int(self.cfg, "poll_interval_minutes", 30))
             await asyncio.sleep(minutes * 60)
             try:
                 if not self.cfg.get("report_enabled", True):
@@ -581,8 +652,8 @@ class StatusSyncPlugin(Star):
 
     async def _change_loop(self):
         """短间隔检测目标程序运行状态变化，变化时立即播报（实时性）"""
-        interval = max(10, int(self.cfg.get("state_change_interval_seconds", 60)))
         while True:
+            interval = max(10, _cfg_int(self.cfg, "state_change_interval_seconds", 60))
             await asyncio.sleep(interval)
             try:
                 if not self.cfg.get("state_change_report", False):

@@ -279,12 +279,83 @@ class RuleManager:
             logger.warning(f"读取 opencode 配置失败: {e}")
             return {}
 
+    @staticmethod
+    def _extract_comments(text: str) -> list[tuple[int, str, str]]:
+        """提取原文件注释: [(所在行号, 注释文本, 所属键)]。
+
+        注释行/块的下一行若出现键（如 "permission":），则归属该键；
+        否则归属前一个已知键（文件头注释归 None）。
+        """
+        comments: list[tuple[int, str, str]] = []
+        lines = text.splitlines()
+        cur_key = None
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("//"):
+                comments.append((idx, line, cur_key))
+            elif stripped.startswith("/*"):
+                buf = [line]
+                end = idx
+                while not stripped.endswith("*/") and end + 1 < len(lines):
+                    end += 1
+                    stripped = lines[end].strip()
+                    buf.append(lines[end])
+                comments.append((idx, "\n".join(buf), cur_key))
+            else:
+                # 键行: 找到第一个 "xxx": 形式
+                m = re.search(r'"([^"]+)"\s*:', line)
+                if m:
+                    cur_key = m.group(1)
+        return comments
+
     def save(self, data: dict):
+        """写回配置：保留原文件注释（JSONC），避免远程改规则把注释全冲掉"""
         parent = os.path.dirname(self.config_file)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(self.config_file, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=2)
+        comments: list[tuple[int, str, str]] = []
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, "r", encoding="utf-8") as fh:
+                    comments = self._extract_comments(fh.read())
+        except OSError as e:
+            logger.warning(f"读取原配置注释失败（不保留注释）: {e}")
+
+        body = json.dumps(data, ensure_ascii=False, indent=2)
+        if not comments:
+            tmp = self.config_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(body + "\n")
+            os.replace(tmp, self.config_file)
+            return
+
+        # 按「键 → 注释列表」组织，插入到对应键行之前（保持原顺序）
+        by_key: dict[str, list[str]] = {}
+        for _, text, key in comments:
+            by_key.setdefault(key, []).append(text)
+
+        def _indent_of(line: str) -> str:
+            return line[: len(line) - len(line.lstrip())]
+
+        out_lines: list[str] = []
+        for line in body.splitlines():
+            m = re.search(r'"([^"]+)"\s*:', line)
+            key = m.group(1) if m else None
+            if key in by_key and by_key[key]:
+                # 块注释保持原缩进，行注释跟随键缩进
+                for c in by_key.pop(key):
+                    out_lines.append(c)
+            out_lines.append(line)
+        # 剩余未归位的注释（顶层/文件头）追加到文件末尾
+        for leftovers in by_key.values():
+            out_lines.extend(leftovers)
+
+        tmp = self.config_file + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(out_lines) + "\n")
+        os.replace(tmp, self.config_file)
 
     def set_rule(self, tool: str, pattern: str, action: str) -> str:
         """设置一条规则，返回描述文本"""

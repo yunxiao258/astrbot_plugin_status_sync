@@ -181,7 +181,15 @@ class Monitor:
             machines = data.get("machines", [])
             logger.info(f"状态同步：已加载机器配置 {path}，共 {len(machines)} 台")
             try:
-                lock_machines_file(path)
+                # icacls 可能耗时（15s 超时），在事件循环中时放入线程避免阻塞
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is not None:
+                    loop.run_in_executor(None, lock_machines_file, path)
+                else:
+                    lock_machines_file(path)
             except Exception:  # noqa: BLE001
                 pass
         except FileNotFoundError:
