@@ -1,7 +1,7 @@
 ﻿"""AstrBot 插件：同步电脑端 opencode / mimocode / openclaw 等程序运行状态。
 
 功能：
-- /机器状态（或 /sync）：查看所有机器状态概览
+- /机器状态（或 /sync、/status）：查看所有机器状态概览
 - /机器状态 <机器名>：查看指定机器详细状态（进程/CLI/日志）
 - /机器状态 file [格式] [粒度]：立即生成状态文件（格式 json/md/txt/csv，粒度 summary/full）
 - /机器状态 report：立即向播报目标发送一次状态报告
@@ -9,9 +9,13 @@
 - /机器状态 权限...：权限规则远程管理（允许/拒绝/询问/删除/清空/事件）
 - /机器状态 同意 <ID> / 拒绝 <ID>：serve 模式下远程批准/拒绝挂起的权限请求
 - /机器状态 加密串 <明文>：把密码加密成 dpapi: 密文（凭据安全）
+- /机器状态 set <状态词>：快捷切换状态（在线/忙碌/勿扰/隐身/离开/自定义或任意词）
+- /机器状态 words：查看预设状态词库与说明
+- /机器状态 report <N>：最近 N 天（默认 7）在线时长报表（每日总时长/各状态占比/最长连续在线）
 - 定时自动播报（默认每 30 分钟），状态变化实时播报（默认每 60 秒检测）
 - 权限事件监控：opencode 日志中的权限请求/评估自动转发到群
 - 状态文件支持多格式、多种送达方式（文本/文件/本地），生成时机可配置（手动/定时/变化时）
+- 状态变更通知：状态切换实时推送到指定群（notify_targets，去抖防重复）
 
 机器配置见 data/machines.json，格式说明见 monitor.py 顶部注释。
 """
@@ -34,6 +38,14 @@ from .formatter import (
 )
 from .monitor import Monitor
 from .perm import PermissionMonitor, PermRequest, RuleManager, ServeClient
+from .user_status import (
+    DEFAULT_REPORT_DAYS,
+    MAX_WORD_LEN,
+    NotifyDebounce,
+    StatusStore,
+    build_words,
+    is_valid_word,
+)
 from .ws_server import WsHub
 
 FILE_FORMATS = ("json", "md", "txt", "csv")
@@ -52,7 +64,7 @@ def _cfg_int(cfg, key: str, default: int) -> int:
     "astrbot_plugin_status_sync",
     "yunxiao258",
     "同步电脑端 opencode / mimocode / openclaw 等程序运行状态",
-    "1.1.3",
+    "1.2.0",
     repo="https://github.com/yunxiao258/astrbot_plugin_status_sync",
 )
 class StatusSyncPlugin(Star):
@@ -70,6 +82,9 @@ class StatusSyncPlugin(Star):
         self._ws_task: asyncio.Task | None = None
         self._recent_sessions: list[str] = []
         self._loop = asyncio.get_event_loop()
+        # 快捷状态与在线时长统计（惰性初始化，兼容测试用 __new__ 构造）
+        self.status_store = StatusStore(self.plugin_dir)
+        self._status_debounce = NotifyDebounce()
         # WebSocket 实时推送
         self._ws = WsHub(
             config.get("ws_port", 8765),
@@ -112,7 +127,7 @@ class StatusSyncPlugin(Star):
             )
         return "你没有执行此命令的权限（不在 admin_umos 白名单内）"
 
-    @filter.command("机器状态", alias={"sync", "状态同步"})
+    @filter.command("机器状态", alias={"sync", "状态同步", "status"})
     async def status_cmd(self, event: AstrMessageEvent):
         """查询机器状态：/机器状态、/机器状态 <机器名>、/机器状态 file、/机器状态 report、/机器状态 reload"""
         if not self.cfg.get("enabled", True):
@@ -151,6 +166,13 @@ class StatusSyncPlugin(Star):
                 states, formats=formats, detail=detail
             )
             return f"状态文件已生成并送达（{done}）"
+        if cmd == "set":
+            return await self._handle_status_set(tokens, event)
+        if cmd == "words":
+            return self._handle_status_words()
+        if cmd == "report" and len(tokens) > 1 and str(tokens[1]).isdigit():
+            # 带数字参数：在线时长报表（只读查询，对所有人开放）
+            return await self._handle_status_report(tokens)
         if cmd == "report":
             if not self._is_admin(event):
                 return self._deny()
@@ -184,6 +206,117 @@ class StatusSyncPlugin(Star):
             names = "、".join(s.get("name", "?") for s in states)
             return f"未找到机器 {sub}，可用机器: {names}"
         return format_detail(st)
+
+    # ---------- 快捷状态（set / words / report N） ----------
+
+    def _get_status_store(self) -> StatusStore:
+        """惰性获取状态存储（兼容测试用 __new__ 构造的实例）"""
+        store = getattr(self, "status_store", None)
+        if store is None:
+            store = StatusStore(self.plugin_dir)
+            self.status_store = store
+        return store
+
+    def _extra_words(self) -> list[str]:
+        """配置扩展词库（extra_words），兼容逗号分隔字符串与 list"""
+        return self._split_cfg("extra_words", "")
+
+    async def _handle_status_set(self, tokens: list[str], event: AstrMessageEvent) -> str:
+        """快捷状态切换：/机器状态 set <状态词>（预设词或任意自定义词，无需审批）"""
+        if len(tokens) < 2:
+            cur = self._get_status_store().load_status()
+            cur_txt = (
+                f"当前状态: {cur['status']}（更新于 {cur['updated_at']}）"
+                if cur else "当前无状态记录"
+            )
+            return (
+                "用法: /机器状态 set <状态词>\n"
+                "预设词: 在线/忙碌/勿扰/隐身/离开/自定义\n"
+                "也支持任意自定义词（如 set 摸鱼中），/机器状态 words 查看词库说明\n"
+                + cur_txt
+            )
+        word = " ".join(tokens[1:]).strip()
+        if tokens[1].strip() == "自定义" and len(tokens) > 2:
+            # 兼容「set 自定义 <任意词>」形式：取后续词为实际状态
+            word = " ".join(tokens[2:]).strip()
+        if not is_valid_word(word):
+            return f"状态词无效或过长（最多 {MAX_WORD_LEN} 字）"
+        store = self._get_status_store()
+        source = str(event.session)
+        changed, prev = store.set_status(word, source)
+        logger.info(
+            f"状态同步：{source} 设置状态"
+            f"「{prev.get('status') if prev else '（无）'}」→「{word}」（变更={changed}）"
+        )
+        if not changed:
+            return (
+                f"状态未变化，当前已是「{word}」"
+                f"（{prev.get('updated_at', '')} 设置）"
+            )
+        store.append_event(word, source)
+        # 状态变更实时通知（notify_enabled 开启且配置目标时推送，去抖防重复）
+        if self.cfg.get("notify_enabled", False):
+            await self._notify_status_change(word, source)
+        return f"状态已切换为「{word}」"
+
+    def _handle_status_words(self) -> str:
+        """查看预设状态词库与说明"""
+        words = build_words(self._extra_words())
+        lines = ["[状态同步] 快捷状态词库"]
+        for w, desc in words.items():
+            lines.append(f"- {w}: {desc}")
+        cur = self._get_status_store().load_status()
+        if cur:
+            lines.append(
+                f"当前状态: {cur['status']}（更新于 {cur['updated_at']}，来源 {cur['source']}）"
+            )
+        lines.append("用法: /机器状态 set <状态词>；/机器状态 report <N> 查看在线时长报表")
+        return "\n".join(lines)
+
+    async def _handle_status_report(self, tokens: list[str]) -> str:
+        """最近 N 天在线时长报表：/机器状态 report [N]（默认 7，范围 1~90）"""
+        days = DEFAULT_REPORT_DAYS
+        if len(tokens) > 1 and str(tokens[1]).isdigit():
+            try:
+                days = max(1, min(int(tokens[1]), 90))
+            except (TypeError, ValueError):
+                days = DEFAULT_REPORT_DAYS
+        try:
+            return self._get_status_store().report(days)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("在线时长报表生成失败")
+            return f"在线时长报表生成失败: {e}"
+
+    def _notify_targets(self) -> list[str]:
+        """状态变更通知目标群 UMO 列表（notify_targets 配置）"""
+        v = self.cfg.get("notify_targets", "")
+        if isinstance(v, str):
+            return [x.strip() for x in v.split(",") if x.strip()]
+        return [x for x in (v or []) if x]
+
+    def _get_status_debounce(self) -> NotifyDebounce:
+        """惰性获取通知去抖器（兼容测试用 __new__ 构造的实例）"""
+        db = getattr(self, "_status_debounce", None)
+        if db is None:
+            db = NotifyDebounce()
+            self._status_debounce = db
+        return db
+
+    async def _notify_status_change(self, status: str, source: str) -> None:
+        """状态变更实时通知（去抖：同状态窗口内只通知一次，不阻塞现有循环）"""
+        targets = self._notify_targets()
+        if not targets:
+            return
+        window = _cfg_int(self.cfg, "notify_debounce_seconds", 60)
+        if not self._get_status_debounce().should_notify(status, window):
+            return
+        text = (
+            "[状态同步] 状态变更通知\n"
+            f"新状态: {status}\n"
+            f"来源: {source}\n"
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        await self._broadcast_to(targets, text)
 
     # ---------- 权限远程控制 ----------
 
@@ -360,12 +493,16 @@ class StatusSyncPlugin(Star):
             logger.warning(f"self_id 直发失败（回退 send_message）: {e!r}")
         return await self.context.send_message(umo, chain)
 
-    async def _broadcast(self, text: str):
-        for umo in self._report_targets():
+    async def _broadcast_to(self, umos: list[str], text: str):
+        """向指定会话 UMO 列表播报文本（单目标失败不影响其他）"""
+        for umo in umos:
             try:
                 await self._send_chain(umo, MessageChain([Plain(text)]))
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"播报到 {umo} 失败: {e}")
+
+    async def _broadcast(self, text: str):
+        await self._broadcast_to(self._report_targets(), text)
 
     def _split_cfg(self, key: str, default: str | None) -> list[str]:
         """把逗号分隔的配置项拆成列表"""

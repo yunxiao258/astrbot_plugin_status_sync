@@ -3,13 +3,16 @@ display_name: 状态同步
 desc: 同步电脑端 opencode / mimocode / openclaw 的运行状态，支持本机与远程多机器检测
 help: |
   在群聊发送以下命令：
-  - /机器状态（或 /sync）：查看所有机器状态概览
+  - /机器状态（或 /sync、/status）：查看所有机器状态概览
   - /机器状态 <机器名>：查看指定机器详细状态
   - /机器状态 file：立即生成状态文件
   - /机器状态 report：立即向播报目标发送一次状态报告
+  - /机器状态 set <状态词>：快捷切换状态（在线/忙碌/勿扰/隐身/离开/自定义或任意词）
+  - /机器状态 words：查看预设状态词库与说明
+  - /机器状态 report <N>：最近 N 天在线时长报表（默认 7）
   定时自动播报默认每 30 分钟一次，可在插件配置中调整。
   机器配置见 data/machines.json（支持 local / ssh / winrm / http 四种类型）。
-version: 1.1.3
+version: 1.2.0
 author: yunxiao258
 repo: https://github.com/yunxiao258/astrbot_plugin_status_sync
 

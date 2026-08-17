@@ -123,5 +123,25 @@
     "description": "机器配置 JSON 文件路径（相对插件目录），文件不存在时使用内置默认配置",
     "type": "string",
     "default": "data/machines.json"
+  },
+  "extra_words": {
+    "description": "快捷状态词库扩展，多个用英文逗号分隔；支持纯词或「词:说明」形式，如 摸鱼:休息一下,开会:会议中",
+    "type": "string",
+    "default": ""
+  },
+  "notify_enabled": {
+    "description": "是否启用状态变更实时通知（状态切换时推送到 notify_targets 指定的群）",
+    "type": "bool",
+    "default": false
+  },
+  "notify_targets": {
+    "description": "状态变更通知目标会话 UMO（如 default:GroupMessage:1234567890），多个用英文逗号分隔；需 notify_enabled 开启",
+    "type": "string",
+    "default": ""
+  },
+  "notify_debounce_seconds": {
+    "description": "状态通知去抖窗口（秒），同状态在窗口内只通知一次",
+    "type": "int",
+    "default": 60
   }
 }
