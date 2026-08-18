@@ -1,6 +1,6 @@
 # astrbot_plugin_status_sync
 
-AstrBot 插件：同步电脑端 opencode / mimocode / openclaw 等程序运行状态，支持本机与远程多机器检测。
+AstrBot 插件：同步电脑端 opencode / mimocode / openclaw 等程序运行状态，支持本机与远程多机器检测。版本 **1.2.0**，许可证 **MIT**。
 
 > 凭据配置（Windows / Linux / Docker 三套方案）见 [SECURITY.md](SECURITY.md)。
 
@@ -20,6 +20,7 @@ AstrBot 插件：同步电脑端 opencode / mimocode / openclaw 等程序运行�
 - 状态变更通知：状态切换实时推送到指定群（去抖防重复）
 - 权限远程控制：日志权限事件通知 + 远程规则管理 + serve 模式实时批准/拒绝
 - 凭据安全：env/file/dpapi 引用，ACL 自动收紧，keys 不落明文
+- WebSocket 实时推送：状态变化与定时快照推送给桌面端订阅者（需 `websockets` 库）
 - 支持本机与远程（SSH/WinRM/HTTP）多机器，host 支持 IP 与域名
 - 主动查询：`/机器状态` 任意时刻查看实时状态
 
@@ -28,6 +29,7 @@ AstrBot 插件：同步电脑端 opencode / mimocode / openclaw 等程序运行�
 | 命令 | 说明 |
 | --- | --- |
 | `/机器状态` 或 `/sync` | 所有机器状态概览 |
+| `/机器状态 <机器名>` | 查看指定机器详细状态（进程/CLI/日志） |
 | `/机器状态 file [格式] [粒度]` | 立即生成状态文件并送达（格式 `json/md/txt/csv`，粒度 `summary/full`，可省略按配置） |
 | `/机器状态 report` | 立即播报一次状态 |
 | `/机器状态 reload` | 重新加载机器配置 |
@@ -39,12 +41,34 @@ AstrBot 插件：同步电脑端 opencode / mimocode / openclaw 等程序运行�
 | `/机器状态 同意 <ID>` / `拒绝 <ID>` | serve 模式下批准/拒绝挂起的权限请求（追加 `always` 表示记住） |
 | `/机器状态 加密串 <明文>` | 生成 DPAPI 密文，供凭据字段使用（仅本机当前用户可解） |
 | `/机器状态 set <状态词>` | 快捷切换状态：预设词（在线/忙碌/勿扰/隐身/离开/自定义）或任意自定义词（如 `set 摸鱼中`），无需审批 |
-| `/机器状态 words` | 查看预设状态词库与说明（含配置扩展词） |
+| `/机器状态 words` | 查看预设状态词库与说明（含配置扩展词与当前状态） |
 | `/机器状态 report <N>` | 最近 N 天（默认 7，范围 1~90）在线时长报表：每日总时长、各状态占比、最长连续在线 |
 
-> **权限说明**：概览与机器详情等只读查询对所有人开放；`file`、`report`、`reload`、`权限*`、`同意/拒绝`、`加密串` 等管理命令仅限 `admin_umos` 白名单会话（未配置时全部管理命令不可用并提示配置）。`set`/`words`/`report <N>` 为新增能力，`set` 普通切换无需审批（记录日志），`words` 与 `report <N>` 为只读查询对所有人开放。
+> **权限说明**：概览、机器详情、`set`、`words`、`report <N>` 等只读/常规操作对所有人开放；`file`、`report`、`reload`、`权限*`、`同意/拒绝`、`加密串` 等管理命令仅限 `admin_umos` 白名单会话（未配置时全部管理命令不可用并提示配置）。
 >
 > 命令名遵循 AstrBot 常见命令风格（不带特殊前缀也可触发），与其他插件不冲突。
+
+## 快捷状态与在线时长
+
+### 状态词库（set / words）
+
+- 内置预设词库：**在线**（正常工作，可接受任务）/ **忙碌**（正在处理任务，尽量勿扰）/ **勿扰**（请勿打扰）/ **隐身**（在线但对他人隐藏）/ **离开**（暂时离开）/ **自定义**（自定义状态词）
+- `extra_words` 配置可扩展词库，支持纯词（说明默认为"配置扩展词"）或「词:说明」形式，如 `摸鱼:休息一下,开会:会议中`
+- `/机器状态 set <任意词>` 支持任意自定义词（最长 20 字，防刷屏）；`set 自定义 <任意词>` 为兼容写法
+- 同一状态连续设置不重复写入、不产生新事件
+
+### 在线时长统计（report N）
+
+- 每次状态切换追加一条历史事件（时间戳 + 状态词 + 来源会话），按自然日拆分统计
+- 跨天场景正确归属：凌晨切换、设备重启后状态持续到次日，均按天切开计入各自然日
+- 报表内容：每日总时长、各状态时长与占比、最长连续在线（仅统计「在线」状态）、合计
+- 历史数据自动保留最近 90 天（裁剪旧数据防膨胀），报表支持 1~90 天窗口
+
+### 状态变更通知
+
+- `notify_enabled` 开启且配置 `notify_targets` 后，状态切换实时推送到指定群
+- 通知内容：新状态、来源会话、时间
+- 去抖机制：同一状态在 `notify_debounce_seconds`（默认 60 秒）窗口内只通知一次，不阻塞现有播报/检测循环
 
 ## 机器配置
 
@@ -149,11 +173,20 @@ SSH 密码、WinRM 密码、HTTP token 等敏感字段**不要明文**写在 `da
 1. **日志事件通知**：监控 opencode 日志中的权限评估事件（`message=evaluated permission=...`），
    按 `permission_forward_level` 配置转发到群（默认 `deny,ask`：只通知被阻止与请求批准的事件）。
 2. **远程规则管理**：`/机器状态 权限允许/拒绝/询问 <工具> <模式>` 直接修改
-   `~/.config/opencode/opencode.jsonc` 的 permission 规则（opencode 自动热加载），
+   `~/.config/opencode/opencode.jsonc` 的 permission 规则（保留原文件注释，opencode 自动热加载），
    对后续请求生效——可在手机上远程"同意"或"拒绝"某类操作。
 3. **serve 模式实时批准**：配置 `opencode_serve_url`（如 `http://127.0.0.1:4096`）后，
-   插件连接 `opencode serve` 的 HTTP API，权限请求发生时立即转发到群，
+   插件连接 `opencode serve` 的 HTTP API（可选 Basic Auth），权限请求发生时立即转发到群，
    管理员回复 `/机器状态 同意 <ID>` 或 `/机器状态 拒绝 <ID>` 直接处理**当前挂起**的请求。
+   服务端未就绪时自动后台重连；日志 `asking id=` 行（带权限 ID）也会桥接为挂起请求供群内审批。
+
+## WebSocket 实时推送
+
+配置 `ws_enabled` 开启后，插件在 `ws_port`（默认 8765）启动 WebSocket 广播服务（需 `pip install websockets`）：
+
+- 客户端连接：`ws://<astrbot主机>:<ws_port>/?token=<ws_token>`（未配置 `ws_token` 时本机内网可直连，不鉴权）
+- 推送内容：定时播报时的全量状态快照（`type: status`）与状态变化事件（`type: state_change`，含变化描述与全量状态）
+- token 校验使用常量时间比较，支持 `?token=` 与 `?access_token=` 两种参数形式
 
 ## 与 astrbot_plugin_remote_task 联动
 
@@ -198,6 +231,7 @@ remote_task 下发的任务执行中，opencode 若需要对某工具请求权�
 | 配置项 | 说明 |
 | --- | --- |
 | `enabled` | 插件总开关 |
+| `admin_umos` | 管理员会话 UMO 白名单（`file`/`report`/`reload`/`权限*`/`同意/拒绝`/`加密串` 等管理命令仅限此列表），逗号分隔；留空则管理命令全部不可用 |
 | `poll_interval_minutes` | 定时播报间隔（分钟，默认 30） |
 | `report_enabled` | 是否定时自动播报 |
 | `state_change_report` | 状态变化即时播报（启动/停止通知，默认开） |
@@ -221,13 +255,21 @@ remote_task 下发的任务执行中，opencode 若需要对某工具请求权�
 | `notify_enabled` | 状态变更实时通知开关（状态切换时推送，默认关） |
 | `notify_targets` | 状态变更通知目标群 UMO（如 `default:GroupMessage:1234567890`），逗号分隔 |
 | `notify_debounce_seconds` | 状态通知去抖窗口（秒，默认 60）：同状态在窗口内只通知一次 |
+| `ws_enabled` | 是否启用 WebSocket 实时推送（需要 `websockets` 库） |
+| `ws_port` | WebSocket 监听端口（默认 8765） |
+| `ws_token` | WebSocket 访问令牌（客户端需 `?token=<令牌>` 连接；留空不鉴权，仅建议内网使用） |
 
-## 快捷状态与在线时长
+## 数据存储
 
-- 状态词库内置：在线 / 忙碌 / 勿扰 / 隐身 / 离开 / 自定义；`extra_words` 可扩展（含说明）
-- `status set <词>` 写入 `data/user_status.json`（原子写），每次切换追加到 `data/status_history.json`（原子写）
-- 在线时长按天拆分统计：凌晨跨天、设备重启后状态持续到次日都会正确归属到各自然日；历史数据自动保留最近 90 天
-- 状态变更通知在状态写入点触发，同状态连续写不重复通知（去抖窗口可配），不阻塞现有播报/检测循环
+插件数据保存在插件目录 `data/` 下：
+
+| 文件 | 说明 |
+| --- | --- |
+| `machines.json` | 机器配置（不存在时用内置默认配置；启动时自动收紧 Windows ACL） |
+| `status_sync.json` 等 | 状态文件输出（格式由 `file_formats` 决定，文件名来自 `status_file` 基础名） |
+| `user_status.json` | 当前快捷状态（状态词/更新时间/来源，原子写） |
+| `status_history.json` | 状态切换历史事件（保留最近 90 天，原子写，供在线时长报表） |
+| `perm_cursor.json` | 权限日志监控游标（各日志文件的读取偏移，断点续读） |
 
 ## 依赖
 
@@ -235,3 +277,21 @@ remote_task 下发的任务执行中，opencode 若需要对某工具请求权�
 - SSH 模式：`paramiko`
 - WinRM 模式：`pywinrm`
 - HTTP 模式：`requests`（一般已装）
+- WebSocket 推送：`websockets`（可选，未安装时仅提示不可用）
+
+## 更新记录
+
+- **1.2.0**：新增快捷状态词库（`set`/`words`，内置 6 词 + `extra_words` 扩展）、在线时长统计（`report <N>`，跨天拆分、保留 90 天）、状态变更通知（`notify_targets` 推送 + 去抖防重复）
+- **1.1.3**：修复 reload 连接泄漏、WinRM 加锁与超时、消息解析失败回退发送
+- **1.1.2**：新增 WebSocket 实时推送（状态变化 + 定时快照，token 鉴权）
+- **1.1.1**：修复 SSH 读取无超时挂死、Windows JSON 截断解析崩溃
+- **1.1.0**：安全加固：`admin_umos` 白名单，管理命令仅限管理员
+- **1.0.0**：初始版本：多机器状态检测、多格式状态文件与群播报
+
+## 开发与测试
+
+```bash
+python -m unittest test_status_sync test_user_status test_perm test_ws_server test_integration -v
+```
+
+测试共 74 个，覆盖命令路由与权限、快捷状态词库与在线时长统计、权限事件解析与规则管理、WebSocket 鉴权与推送、端到端集成流程。
