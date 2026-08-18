@@ -247,6 +247,17 @@ def test_file_delivery():
     t = asyncio.run(run_cmd(plugin, "机器状态 file"))
     check("无格式提示", "未生成文件" in t)
 
+    # 关闭状态文件输出开关：即使 file/local 送达也不生成文件
+    plugin = make_plugin({
+        "status_file_enabled": False,
+        "file_delivery": "file,local",
+        "file_formats": "md",
+        "report_groups": "default:GroupMessage:1234567890",
+        "admin_umos": "default:GroupMessage:1234567890",
+    })
+    t = asyncio.run(run_cmd(plugin, "机器状态 file"))
+    check("关闭开关无文件提示", "文件(" not in t and "已存本地" not in t)
+
     # full 粒度文本送达（full 内容在播报消息中）
     plugin = make_plugin({
         "file_delivery": "text",

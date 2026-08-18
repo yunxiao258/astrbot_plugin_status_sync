@@ -555,7 +555,9 @@ class StatusSyncPlugin(Star):
         if "text" in delivery and send_text:
             await self._broadcast(render_text(states, detail))
             out.append("文本")
-        if "file" in delivery or "local" in delivery:
+        if ("file" in delivery or "local" in delivery) and self.cfg.get(
+            "status_file_enabled", True
+        ):
             out_dir, base = self._status_file_dir()
             written = write_files(states, out_dir, base, fmt_list, detail)
             if not written:
