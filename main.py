@@ -127,7 +127,7 @@ class StatusSyncPlugin(Star):
             )
         return "你没有执行此命令的权限（不在 admin_umos 白名单内）"
 
-    @filter.command("机器状态", alias={"sync", "状态同步", "status"})
+    @filter.command("机器状态", alias={"sync", "状态同步"})
     async def status_cmd(self, event: AstrMessageEvent):
         """查询机器状态：/机器状态、/机器状态 <机器名>、/机器状态 file、/机器状态 report、/机器状态 reload"""
         if not self.cfg.get("enabled", True):

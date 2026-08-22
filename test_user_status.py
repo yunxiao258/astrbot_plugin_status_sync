@@ -398,13 +398,15 @@ class TestStatusCommands(unittest.TestCase):
 
     def test_report_command(self):
         store = StatusStore(self.tmp.name)
-        store.append_event("在线", "s1", "2026-08-16 23:00:00")
-        store.append_event("忙碌", "s2", "2026-08-17 02:00:00")
+        # 动态日期：昨天 + 今天，避免测试随真实日期过期失效
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        store.append_event("在线", "s1", f"{yesterday} 12:00:00")
+        store.append_event("忙碌", "s2", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         plugin = make_plugin(tmp_dir=self.tmp.name)
         plugin.status_store = store
         t = self.run_cmd(plugin, "status report 2")
         self.assertIn("在线时长报表（最近 2 天）", t)
-        self.assertIn("2026-08-17", t)
+        self.assertIn(datetime.now().strftime("%Y-%m-%d"), t)
         self.assertIn("最长连续在线", t)
         # 默认 7 天
         t = self.run_cmd(plugin, "status report 7")
