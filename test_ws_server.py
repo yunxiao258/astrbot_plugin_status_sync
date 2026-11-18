@@ -6,10 +6,11 @@
 """
 
 import asyncio
+import os
 import sys
 import unittest
 
-_PLUGIN_DIR = r"D:\astrbot\data\plugins\astrbot_plugin_status_sync"
+_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _PLUGIN_DIR)
 
 from ws_server import WsHub  # noqa: E402

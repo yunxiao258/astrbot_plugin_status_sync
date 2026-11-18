@@ -64,7 +64,7 @@ def _cfg_int(cfg, key: str, default: int) -> int:
     "astrbot_plugin_status_sync",
     "yunxiao258",
     "同步电脑端 opencode / mimocode / openclaw 等程序运行状态",
-    "1.2.0",
+    "1.3.0",
     repo="https://github.com/yunxiao258/astrbot_plugin_status_sync",
 )
 class StatusSyncPlugin(Star):
@@ -81,7 +81,7 @@ class StatusSyncPlugin(Star):
         self._serve_init_task: asyncio.Task | None = None
         self._ws_task: asyncio.Task | None = None
         self._recent_sessions: list[str] = []
-        self._loop = asyncio.get_event_loop()
+        self._loop = None
         # 快捷状态与在线时长统计（惰性初始化，兼容测试用 __new__ 构造）
         self.status_store = StatusStore(self.plugin_dir)
         self._status_debounce = NotifyDebounce()
@@ -170,6 +170,10 @@ class StatusSyncPlugin(Star):
             return await self._handle_status_set(tokens, event)
         if cmd == "words":
             return self._handle_status_words()
+        if cmd in ("状态历史", "history"):
+            return self._handle_status_history(tokens)
+        if cmd in ("帮助", "help"):
+            return self._help_text()
         if cmd == "report" and len(tokens) > 1 and str(tokens[1]).isdigit():
             # 带数字参数：在线时长报表（只读查询，对所有人开放）
             return await self._handle_status_report(tokens)
@@ -286,6 +290,34 @@ class StatusSyncPlugin(Star):
         except Exception as e:  # noqa: BLE001
             logger.exception("在线时长报表生成失败")
             return f"在线时长报表生成失败: {e}"
+
+    def _handle_status_history(self, tokens: list[str]) -> str:
+        """查看最近 N 条用户快捷状态切换历史（默认 10，上限 50）"""
+        limit = 10
+        if len(tokens) > 1 and str(tokens[1]).isdigit():
+            limit = max(1, min(int(tokens[1]), 50))
+        evs = self._get_status_store().load_events()
+        if not evs:
+            return "暂无状态切换记录，可先使用 /机器状态 set <状态词> 记录状态"
+        tail = evs[-limit:][::-1]
+        lines = [f"[状态同步] 最近 {len(tail)}/{len(evs)} 条状态切换记录"]
+        for ev in tail:
+            ts = ev["ts"].strftime("%Y-%m-%d %H:%M:%S")
+            src = f" ({ev['source']})" if ev.get("source") else ""
+            lines.append(f"- {ts} → 「{ev['status']}」{src}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _help_text() -> str:
+        return (
+            "[状态同步] 可用指令:\n"
+            "/机器状态（或 /sync） 查看全部机器概览\n"
+            "/机器状态 <机器名> 查看机器详情\n"
+            "/机器状态 set <状态词> / words / 状态历史 [N]\n"
+            "/机器状态 report [N] 查看在线时长报表（无数字为管理员播报）\n"
+            "/机器状态 file [格式] [粒度] / reload（管理员）\n"
+            "/机器状态 权限... / 同意 <ID> / 拒绝 <ID> / 加密串（管理员）"
+        )
 
     def _notify_targets(self) -> list[str]:
         """状态变更通知目标群 UMO 列表（notify_targets 配置）"""
@@ -572,31 +604,39 @@ class StatusSyncPlugin(Star):
 
     # ---------- 生命周期与定时播报 ----------
 
-    @filter.on_astrbot_loaded()
-    async def on_astrbot_loaded(self):
-        self.initialize()
+    def _get_loop(self):
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        return self._loop
 
-    def initialize(self):
-        """插件热重载后启动全部后台任务（幂等；done_callback 记录异常防静默死亡）"""
+    async def initialize(self):
+        """插件加载/热重载后异步启动全部后台任务（幂等；done_callback 记录异常防静默死亡）"""
+        self._get_loop()
         if not self.cfg.get("enabled", True):
             return
         self.monitor.reload()
-        if self._task is None:
+        if getattr(self, "_task", None) is None:
             self._task = self._spawn("播报", self._poll_loop)
-        if self._change_task is None:
+        if getattr(self, "_change_task", None) is None:
             self._change_task = self._spawn("变化检测", self._change_loop)
-        if self._perm_task is None:
+        if getattr(self, "_perm_task", None) is None:
             self.perm_monitor.load_cursor()
             self._perm_task = self._spawn("权限监控", self._perm_loop)
-        if self.serve is not None and self._serve_task is None:
-            if self._serve_init_task is None:
+        if getattr(self, "serve", None) is not None and getattr(self, "_serve_task", None) is None:
+            if getattr(self, "_serve_init_task", None) is None:
                 self._serve_init_task = self._spawn(
                     "serve 初始化", self._init_serve
                 )
-        if self.cfg.get("ws_enabled", False) and self._ws_task is None:
+        if self.cfg.get("ws_enabled", False) and getattr(self, "_ws_task", None) is None:
             if self._ws_start():
                 self._ws_task = self._ws._task
                 logger.info(f"状态同步：WebSocket 实时推送已启用 (ws_port={self._ws.port})")
+
+    async def terminate(self):
+        """插件卸载/重载入口：清理全部后台任务与 WebSocket/SSH 资源"""
+        await self.on_plugin_unloaded()
 
     async def _init_serve(self):
         """异步初始化 serve 连接：探测可达则监听，否则进入重连循环（幂等）"""
@@ -605,7 +645,7 @@ class StatusSyncPlugin(Star):
                 return
             if await self._probe_serve_async():
                 self._serve_task = self._spawn(
-                    "serve 监听", self.serve.listen_loop, self._on_perm_request, self._loop
+                    "serve 监听", self.serve.listen_loop, self._on_perm_request, self._get_loop()
                 )
                 logger.info(f"状态同步：已连接 opencode serve ({self.serve.base_url})")
             elif self._serve_retry_task is None:
@@ -662,7 +702,7 @@ class StatusSyncPlugin(Star):
                     break
             if self.serve and self._serve_task is None:
                 self._serve_task = self._spawn(
-                    "serve 监听", self.serve.listen_loop, self._on_perm_request, self._loop
+                    "serve 监听", self.serve.listen_loop, self._on_perm_request, self._get_loop()
                 )
                 logger.info(f"状态同步：已连接 opencode serve ({self.serve.base_url})")
         except asyncio.CancelledError:
@@ -670,9 +710,16 @@ class StatusSyncPlugin(Star):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"状态同步：serve 重试连接失败: {e}")
 
-    @filter.on_plugin_unloaded()
     async def on_plugin_unloaded(self):
-        for task in (self._task, self._change_task, self._perm_task, self._serve_task, self._serve_retry_task, self._serve_init_task, self._ws_task):
+        for task in (
+            getattr(self, "_task", None),
+            getattr(self, "_change_task", None),
+            getattr(self, "_perm_task", None),
+            getattr(self, "_serve_task", None),
+            getattr(self, "_serve_retry_task", None),
+            getattr(self, "_serve_init_task", None),
+            getattr(self, "_ws_task", None),
+        ):
             if task:
                 task.cancel()
         self._task = None
@@ -682,8 +729,12 @@ class StatusSyncPlugin(Star):
         self._serve_retry_task = None
         self._serve_init_task = None
         self._ws_task = None
-        await self._ws.stop()
-        await self.monitor.close_all()
+        ws = getattr(self, "_ws", None)
+        if ws is not None:
+            await ws.stop()
+        mon = getattr(self, "monitor", None)
+        if mon is not None:
+            await mon.close_all()
 
     async def _perm_loop(self):
         """定期检查 opencode 日志中的权限评估事件并转发"""

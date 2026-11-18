@@ -30,7 +30,7 @@
     "default": 60
   },
   "report_groups": {
-    "description": "定时播报目标会话 UMO（如 default:GroupMessage:1102410958），多个用英文逗号分隔；留空则播报到最近使用过 /status 的会话",
+    "description": "定时播报目标会话 UMO（如 default:GroupMessage:1234567890），多个用英文逗号分隔；留空则播报到最近使用过 /机器状态 的会话",
     "type": "string",
     "default": ""
   },

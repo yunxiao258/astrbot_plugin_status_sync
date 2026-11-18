@@ -100,13 +100,15 @@ class TestStatusStore(unittest.TestCase):
             self.assertEqual(json.load(fh)["status"], "在线")
 
     def test_same_status_not_changed(self):
-        self.store.set_status("在线", "s1", "2026-08-17 10:00:00")
-        changed, prev = self.store.set_status("在线", "s2", "2026-08-17 10:05:00")
+        t1 = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        t2 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.store.set_status("在线", "s1", t1)
+        changed, prev = self.store.set_status("在线", "s2", t2)
         self.assertFalse(changed)
         self.assertEqual(prev["status"], "在线")
         # 同状态不覆盖 updated_at（不产生新事件）
         cur = self.store.load_status()
-        self.assertEqual(cur["updated_at"], "2026-08-17 10:00:00")
+        self.assertEqual(cur["updated_at"], t1)
 
     def test_load_status_missing_file(self):
         self.assertIsNone(self.store.load_status())
@@ -121,8 +123,10 @@ class TestStatusStore(unittest.TestCase):
         self.assertIsNone(self.store.load_status())
 
     def test_append_and_load_events(self):
-        self.store.append_event("在线", "s1", "2026-08-17 10:00:00")
-        self.store.append_event("忙碌", "s2", "2026-08-17 11:00:00")
+        t1 = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        t2 = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        self.store.append_event("在线", "s1", t1)
+        self.store.append_event("忙碌", "s2", t2)
         evs = self.store.load_events()
         self.assertEqual(len(evs), 2)
         self.assertEqual([e["status"] for e in evs], ["在线", "忙碌"])
@@ -133,13 +137,15 @@ class TestStatusStore(unittest.TestCase):
         self.assertEqual(self.store.load_events(), [])
 
     def test_load_events_dirty(self):
+        t1 = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        t2 = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
         os.makedirs(os.path.dirname(self.store.history_path), exist_ok=True)
         with open(self.store.history_path, "w", encoding="utf-8") as fh:
             json.dump({"events": [
-                {"ts": "2026-08-17 10:00:00", "status": "在线", "source": "s1"},
+                {"ts": t1, "status": "在线", "source": "s1"},
                 {"ts": "坏时间", "status": "忙碌"},          # 脏时间戳过滤
-                {"ts": "2026-08-17 11:00:00", "status": ""},  # 空状态过滤
-                {"ts": "2026-08-17 11:00:00", "status": "离开"},  # 正常
+                {"ts": t2, "status": ""},  # 空状态过滤
+                {"ts": t2, "status": "离开"},  # 正常
                 "not a dict",                                # 非对象过滤
             ]}, fh)
         evs = self.store.load_events()
@@ -452,6 +458,29 @@ class TestStatusCommands(unittest.TestCase):
         evs = plugin._get_status_store().load_events()
         self.assertEqual([e["status"] for e in evs], ["在线"])
         self.assertEqual(evs[0]["source"], "default:GroupMessage:666")
+
+    def test_status_history_and_lifecycle(self):
+        import inspect
+        from astrbot_plugin_status_sync.main import StatusSyncPlugin
+        self.assertTrue(inspect.iscoroutinefunction(StatusSyncPlugin.initialize))
+        self.assertTrue(inspect.iscoroutinefunction(StatusSyncPlugin.terminate))
+
+        plugin = make_plugin({}, tmp_dir=self.tmp.name)
+        empty = self.run_cmd(plugin, "status 状态历史")
+        self.assertIn("暂无状态切换记录", empty)
+        self.run_cmd(plugin, "status set 在线")
+        self.run_cmd(plugin, "status set 忙碌")
+        hist = self.run_cmd(plugin, "status 状态历史 5")
+        self.assertIn("忙碌", hist)
+        self.assertIn("在线", hist)
+        help_txt = self.run_cmd(plugin, "status 帮助")
+        self.assertIn("状态历史", help_txt)
+
+        async def run_lifecycle():
+            plugin.cfg = {"enabled": False}
+            await plugin.initialize()
+            await plugin.terminate()
+        self._loop(run_lifecycle())
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # astrbot_plugin_status_sync
 
-AstrBot 插件：同步电脑端 opencode / mimocode / openclaw 等程序运行状态，支持本机与远程多机器检测。版本 **1.2.0**，许可证 **MIT**。
+AstrBot 插件：同步电脑端 opencode / mimocode / openclaw 等程序运行状态，支持本机与远程多机器检测。版本 **1.3.0**，许可证 **MIT**。
 
 > 凭据配置（Windows / Linux / Docker 三套方案）见 [SECURITY.md](SECURITY.md)。
 
@@ -43,6 +43,8 @@ AstrBot 插件：同步电脑端 opencode / mimocode / openclaw 等程序运行�
 | `/机器状态 set <状态词>` | 快捷切换状态：预设词（在线/忙碌/勿扰/隐身/离开/自定义）或任意自定义词（如 `set 摸鱼中`），无需审批 |
 | `/机器状态 words` | 查看预设状态词库与说明（含配置扩展词与当前状态） |
 | `/机器状态 report <N>` | 最近 N 天（默认 7，范围 1~90）在线时长报表：每日总时长、各状态占比、最长连续在线 |
+| `/机器状态 状态历史 [N]` | 查看最近 N 条快捷状态切换记录（默认 10，上限 50） |
+| `/机器状态 帮助` | 查看命令速查与用法说明 |
 
 > **权限说明**：概览、机器详情、`set`、`words`、`report <N>` 等只读/常规操作对所有人开放；`file`、`report`、`reload`、`权限*`、`同意/拒绝`、`加密串` 等管理命令仅限 `admin_umos` 白名单会话（未配置时全部管理命令不可用并提示配置）。
 >
@@ -281,6 +283,7 @@ remote_task 下发的任务执行中，opencode 若需要对某工具请求权�
 
 ## 更新记录
 
+- **1.3.0**：修复 `initialize()` 为同步函数导致 AstrBot v4.27.2 启用时 `TypeError` 的问题，补充 `async def terminate()` 与 `__init__` 事件循环兼容；新增 `/机器状态 状态历史 [N]` 与 `/机器状态 帮助`；同步 `metadata.yaml` 命令说明（移除冲突别名 `/status`）
 - **1.2.0**：新增快捷状态词库（`set`/`words`，内置 6 词 + `extra_words` 扩展）、在线时长统计（`report <N>`，跨天拆分、保留 90 天）、状态变更通知（`notify_targets` 推送 + 去抖防重复）
 - **1.1.3**：修复 reload 连接泄漏、WinRM 加锁与超时、消息解析失败回退发送
 - **1.1.2**：新增 WebSocket 实时推送（状态变化 + 定时快照，token 鉴权）
