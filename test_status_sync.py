@@ -199,28 +199,39 @@ def test_file_renderers():
 
 def test_local_check():
     print("[本机检测]")
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "machines.json")
-    with open(cfg_path, "r", encoding="utf-8") as fh:
-        cfg = json.load(fh)
-
-    class FakeConfig:
-        def get(self, key, default=None):
-            return {
-                "machines_config_file": "data/machines.json",
-                "status_file": "data/status_sync.json",
-            }.get(key, default)
-
     import asyncio
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.makedirs(os.path.join(tmpdir, "data"), exist_ok=True)
+        cfg_path = os.path.join(tmpdir, "data", "machines.json")
+        with open(cfg_path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "machines": [{
+                    "name": "测试本机",
+                    "type": "local",
+                    "targets": [
+                        {"name": "opencode", "patterns": ["opencode"]},
+                        {"name": "mimocode", "patterns": ["mimocode"]},
+                        {"name": "openclaw", "patterns": ["openclaw"]},
+                    ],
+                }]
+            }, fh, ensure_ascii=False)
 
-    mon = Monitor(FakeConfig(), os.path.dirname(os.path.abspath(__file__)))
-    mon.reload()
-    states = asyncio.run(mon.check_all())
-    check("检测到 1 台机器", len(states) == 1)
-    s = states[0]
-    check("本机检测成功", s.get("ok") is True)
-    check("资源字段完整", "cpu" in s["resources"] and "mem_total" in s["resources"])
-    names = {t["name"] for t in s["targets"]}
-    check("目标齐全", {"opencode", "mimocode", "openclaw"} <= names)
+        class FakeConfig:
+            def get(self, key, default=None):
+                return {
+                    "machines_config_file": cfg_path,
+                    "status_file": os.path.join(tmpdir, "data", "status_sync.json"),
+                }.get(key, default)
+
+        mon = Monitor(FakeConfig(), tmpdir)
+        mon.reload()
+        states = asyncio.run(mon.check_all())
+        check("检测到 1 台机器", len(states) == 1)
+        s = states[0]
+        check("本机检测成功", s.get("ok") is True)
+        check("资源字段完整", "cpu" in s["resources"] and "mem_total" in s["resources"])
+        names = {t["name"] for t in s["targets"]}
+        check("目标齐全", {"opencode", "mimocode", "openclaw"} <= names)
 
 
 def test_detect_changes():
