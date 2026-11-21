@@ -1,4 +1,4 @@
-﻿"""AstrBot 插件：同步电脑端 opencode / mimocode / openclaw 等程序运行状态。
+"""AstrBot 插件：同步电脑端 opencode / mimocode / openclaw 等程序运行状态。
 
 功能：
 - /机器状态（或 /sync、/status）：查看所有机器状态概览
@@ -47,6 +47,10 @@ from .user_status import (
     is_valid_word,
 )
 from .ws_server import WsHub
+try:
+    from .hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
+except ImportError:
+    from hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
 
 FILE_FORMATS = ("json", "md", "txt", "csv")
 FILE_DETAILS = ("summary", "full")
@@ -64,10 +68,11 @@ def _cfg_int(cfg, key: str, default: int) -> int:
     "astrbot_plugin_status_sync",
     "云晓",
     "同步电脑端 opencode / mimocode / openclaw 等程序运行状态",
-    "1.3.0",
+    "1.4.0",
     repo="https://github.com/yunxiao258/astrbot_plugin_status_sync",
 )
 class StatusSyncPlugin(Star):
+    HUB_PROTOCOL_VERSION = HUB_PROTOCOL_VERSION
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.cfg = config
@@ -349,6 +354,7 @@ class StatusSyncPlugin(Star):
             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         await self._broadcast_to(targets, text)
+        emit_hub_event("astrbot_plugin_status_sync", "status_sync.status_changed", {"status": status, "source": source, "umo": targets[0] if targets else "", "summary": f"状态切换为 {status}（来源：{source}）"}, self.context)
 
     # ---------- 权限远程控制 ----------
 
@@ -870,3 +876,22 @@ class StatusSyncPlugin(Star):
                 raise
             except Exception:  # noqa: BLE001
                 logger.exception("状态变化检测失败")
+
+    def hub_status(self) -> dict:
+        machines = getattr(self.monitor, "machines", []) or []
+        cur = self._get_status_store().load_status()
+        return {
+            "version": "1.4.0",
+            "status": "online",
+            "metrics": {"监控机器": len(machines), "当前状态": (cur or {}).get("status", "默认"), "WS推送": "开" if self._ws else "关"},
+            "actions": ["get_machines_status", "get_user_status"],
+        }
+
+    async def hub_action(self, action: str, params: dict | None = None) -> dict:
+        if action == "get_machines_status":
+            machines = getattr(self.monitor, "machines", []) or []
+            return {"ok": True, "data": {"count": len(machines), "machines": [getattr(m, "name", str(m)) for m in machines]}}
+        if action == "get_user_status":
+            cur = self._get_status_store().load_status()
+            return {"ok": True, "data": cur or {}}
+        return {"ok": False, "error": f"不支持的动作：{action}"}
