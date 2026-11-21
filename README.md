@@ -297,4 +297,4 @@ remote_task 下发的任务执行中，opencode 若需要对某工具请求权�
 python -m unittest test_status_sync test_user_status test_perm test_ws_server test_integration -v
 ```
 
-测试共 74 个，覆盖命令路由与权限、快捷状态词库与在线时长统计、权限事件解析与规则管理、WebSocket 鉴权与推送、端到端集成流程。
+测试规模：`test_status_sync` 85 项、`test_perm` 61 项、`test_integration` 52 项断言（脚本式，`python test_xxx.py` 运行），`test_user_status` 34 个、`test_ws_server` 15 个 unittest 用例，覆盖命令路由与权限、快捷状态词库与在线时长统计、权限事件解析与规则管理、WebSocket 鉴权与推送、端到端集成流程。

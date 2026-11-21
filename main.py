@@ -62,7 +62,7 @@ def _cfg_int(cfg, key: str, default: int) -> int:
 
 @register(
     "astrbot_plugin_status_sync",
-    "yunxiao258",
+    "云晓",
     "同步电脑端 opencode / mimocode / openclaw 等程序运行状态",
     "1.3.0",
     repo="https://github.com/yunxiao258/astrbot_plugin_status_sync",
