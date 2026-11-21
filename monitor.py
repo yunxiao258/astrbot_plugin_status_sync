@@ -164,7 +164,7 @@ class Monitor:
         self._connectors = {}
         if old_connectors:
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 for conn in old_connectors.values():
                     loop.create_task(conn.close())
             except RuntimeError:

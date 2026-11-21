@@ -283,6 +283,9 @@ remote_task 下发的任务执行中，opencode 若需要对某工具请求权�
 
 ## 更新记录
 
+### v1.4.1
+- 修复 `_change_loop` 检测到机器离线/停止时未上报 `status_sync.machine_offline` 事件的联动漏报 bug，并将 `monitor.py` 中废弃的 `asyncio.get_event_loop()` 替换为 `asyncio.get_running_loop()`
+
 ### v1.4.0
 - 接入插件生态中枢标准联动协议：状态变更事件自动上报中枢归档，管理面板可实时查看机器与在线状态
 

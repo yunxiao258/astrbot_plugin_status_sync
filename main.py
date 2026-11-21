@@ -68,7 +68,7 @@ def _cfg_int(cfg, key: str, default: int) -> int:
     "astrbot_plugin_status_sync",
     "云晓",
     "同步电脑端 opencode / mimocode / openclaw 等程序运行状态",
-    "1.4.0",
+    "1.4.1",
     repo="https://github.com/yunxiao258/astrbot_plugin_status_sync",
 )
 class StatusSyncPlugin(Star):
@@ -858,7 +858,11 @@ class StatusSyncPlugin(Star):
                     continue
                 changes = await self.monitor.detect_changes()
                 if changes:
-                    await self._broadcast("[状态同步] " + "；".join(changes))
+                    summary_txt = "；".join(changes)
+                    await self._broadcast("[状态同步] " + summary_txt)
+                    targets = self._report_targets()
+                    is_offline = any(k in summary_txt for k in ("离线", "停止", "不可达", "down", "offline"))
+                    emit_hub_event("astrbot_plugin_status_sync", "status_sync.machine_offline" if is_offline else "status_sync.status_changed", {"changes": changes, "umo": targets[0] if targets else "", "summary": summary_txt[:260]}, self.context)
                     # WebSocket 实时推送状态变化
                     if self._ws.running:
                         self._ws.broadcast({
@@ -881,7 +885,7 @@ class StatusSyncPlugin(Star):
         machines = getattr(self.monitor, "machines", []) or []
         cur = self._get_status_store().load_status()
         return {
-            "version": "1.4.0",
+            "version": "1.4.1",
             "status": "online",
             "metrics": {"监控机器": len(machines), "当前状态": (cur or {}).get("status", "默认"), "WS推送": "开" if self._ws else "关"},
             "actions": ["get_machines_status", "get_user_status"],
